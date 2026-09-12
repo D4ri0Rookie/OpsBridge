@@ -54,7 +54,7 @@ One line per lifecycle/service/external-dependency event, written with
   "application": "OpsBridge",
   "environment": "Production",
   "correlationId": null,
-  "appVersion": "0.1.0",
+  "appVersion": "0.2.0",
   "listenAddress": "0.0.0.0",
   "port": 8080,
   "protocol": "Https"
@@ -99,6 +99,12 @@ One line per HTTP request/response, written by the endware in
 }
 ```
 
+`timedOut: true` is added when the handler ran past `API_REQUEST_TIMEOUT_SECONDS`
+(default 30s) - a soft, log-only budget (see
+[configuration.md](configuration.md)): the response is still whatever the
+handler produced, this only flags that it was slow. Also logged as its own
+`application.timeout` Application-log event, with `path`/`durationMs`.
+
 ### Error log
 
 Unhandled exceptions, captured automatically by Pode
@@ -137,6 +143,16 @@ command output, and exception messages - any of these can carry the values
 above without the code obviously "logging a credential". When a future
 service captures external command/API output for diagnostics, review it for
 secrets before it reaches `Write-AppLog` / `Write-AppErrorLog`.
+
+**Centralized redaction**: `Write-AppLog` and `Write-AppErrorLog`
+(`src/logging/Logging.ps1`) run their data through `Protect-AppLogData`
+before writing anything. Any key whose name contains `authorization`,
+`password`, `token`, `api[-_]?key`, `secret`, `credential`, or `cookie`
+(case-insensitive, checked recursively) has its value replaced with
+`***REDACTED***`. This protects every call site automatically - but it's
+key-name-based, not a DLP system: it won't catch a secret hiding inside an
+innocuously-named value (e.g. an exception message), which still needs care
+at the call site.
 
 ## Correlation id in logs
 

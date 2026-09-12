@@ -23,7 +23,7 @@ flowchart LR
 
     subgraph API["OpsBridge"]
         direction LR
-        Endpoint --> MW["Correlation ID<br/>+ Security Headers"]
+        Endpoint --> MW["Correlation ID + Security<br/>+ Rate/Concurrency Limits"]
         MW --> Routes["Routes<br/>/api/v1/*"]
         Routes --> Services["Services"]
     end
@@ -66,11 +66,12 @@ docker run --rm -p 8080:8080 opsbridge
 - **Structured JSON logs**, correlation ID on every request/response/log line
 - **One error shape everywhere** — `{ "error": { "code", "message", "correlationId" } }`, no stack traces ever leaked to a client
 - **Thin routes, real services** — automation logic has zero Pode dependency, so it's unit-testable on its own
+- **Built-in hardening** — request body/rate/concurrency limits, graceful shutdown on SIGTERM, all fail-fast on bad config
 - **Nothing hidden** — adding an endpoint means adding a route file + a service file, not learning an internal framework
 
 ## Tests
 
-**88 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
+**160 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
 Integration tests start a real server process and check the actual HTTP
 contract — status codes, headers, JSON shape, correlation id — not just
 isolated functions.
@@ -106,8 +107,10 @@ benchmark, just proof it holds up under concurrent load with the default 3 Pode 
 Early stage. Health endpoints and one reference API
 (`GET /api/v1/windows/services`) are implemented end-to-end — route, service,
 unit + integration tests, docs — as the template every future integration
-follows. Authentication, authorization and rate limiting are deliberately out
-of scope for now (see [architecture.md](docs/architecture.md)).
+follows. Runtime hardening (body/rate/concurrency limits, graceful shutdown —
+see [configuration.md](docs/configuration.md)) is in place; authentication
+and authorization are still deliberately out of scope (see
+[architecture.md](docs/architecture.md)).
 
 ## License
 

@@ -15,7 +15,81 @@
     those warnings with -WarningVariable and re-logs them through the structured
     Application log once logging is up, so a bad API_* value is diagnosable from
     the logs without attaching to the process.
+
+    The settings below (API_MAX_BODY_BYTES, API_MAX_IN_FLIGHT_REQUESTS,
+    API_RATE_LIMIT_*, API_REQUEST_TIMEOUT_SECONDS, API_SHUTDOWN_TIMEOUT_SECONDS)
+    are validated differently: an invalid value throws immediately instead of
+    falling back with a warning, because they protect the process itself -
+    starting up with a broken limit (e.g. a typo'd rate limit) is worse than
+    not starting at all. See docs/configuration.md.
 #>
+
+function ConvertTo-RequiredPositiveInt {
+    <#
+        Shared parser for the fail-fast settings: an unset env var keeps
+        $Default; a set-but-invalid one throws immediately rather than falling
+        back, per the fail-fast rule above.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]
+        $EnvVarName,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [int]
+        $Default
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $Default
+    }
+
+    $parsed = 0
+    if (-not ([int]::TryParse($Value, [ref]$parsed)) -or $parsed -le 0) {
+        throw "$EnvVarName '$Value' is not a positive integer. Fix or unset it to use the default ($Default)."
+    }
+
+    return $parsed
+}
+
+function ConvertTo-RequiredBool {
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]
+        $EnvVarName,
+
+        [Parameter()]
+        [AllowNull()]
+        [string]
+        $Value,
+
+        [Parameter(Mandatory = $true)]
+        [bool]
+        $Default
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $Default
+    }
+
+    $truthy = @('1', 'true', 'yes', 'on')
+    $falsy = @('0', 'false', 'no', 'off')
+    $lower = $Value.ToLowerInvariant()
+
+    if ($lower -in $truthy) { return $true }
+    if ($lower -in $falsy) { return $false }
+
+    throw "$EnvVarName '$Value' is not a boolean (true/false). Fix or unset it to use the default ($Default)."
+}
 
 function Get-AppConfig {
     [CmdletBinding()]
@@ -26,7 +100,7 @@ function Get-AppConfig {
     )
 
     $config = [ordered]@{
-        AppVersion       = '0.1.0'
+        AppVersion       = '0.2.0'
         Environment      = 'Development'   # Development, Test, Production
         ListenAddress    = '0.0.0.0'       # container-friendly default
         Port             = 8080
@@ -40,6 +114,15 @@ function Get-AppConfig {
         LogDestination   = 'stdout'        # stdout, file, both
         LogPath          = (Join-Path $RootPath 'logs')
         LogRetentionDays = 7
+
+        # Hardening settings (docs/configuration.md) - see the fail-fast note above.
+        MaxBodyBytes            = 1MB     # bytes; request bodies over this get 413
+        MaxInFlightRequests     = 100     # concurrent in-flight requests before 503
+        RequestTimeoutSeconds   = 30      # max handler execution time before 504
+        ShutdownTimeoutSeconds  = 30      # grace period for in-flight requests on shutdown
+        RateLimitEnabled        = $false
+        RateLimitRequests       = 300     # requests allowed per window, when enabled
+        RateLimitWindowSeconds  = 60
     }
 
     if ($env:API_ENVIRONMENT) {
@@ -151,6 +234,19 @@ function Get-AppConfig {
             Write-Warning "API_LOG_RETENTION_DAYS '$($env:API_LOG_RETENTION_DAYS)' is not an integer >= 1; keeping default $($config.LogRetentionDays)."
         }
     }
+
+    # --- Hardening settings: fail-fast validation (docs/configuration.md) ---
+    # Unlike every override above, a bad value here is not discarded with a
+    # warning - it throws, and Start-ApplicationServer (src/App.ps1) turns
+    # that into a clean startup failure instead of serving with a silently
+    # broken safety limit.
+    $config.MaxBodyBytes = ConvertTo-RequiredPositiveInt -EnvVarName 'API_MAX_BODY_BYTES' -Value $env:API_MAX_BODY_BYTES -Default $config.MaxBodyBytes
+    $config.MaxInFlightRequests = ConvertTo-RequiredPositiveInt -EnvVarName 'API_MAX_IN_FLIGHT_REQUESTS' -Value $env:API_MAX_IN_FLIGHT_REQUESTS -Default $config.MaxInFlightRequests
+    $config.RequestTimeoutSeconds = ConvertTo-RequiredPositiveInt -EnvVarName 'API_REQUEST_TIMEOUT_SECONDS' -Value $env:API_REQUEST_TIMEOUT_SECONDS -Default $config.RequestTimeoutSeconds
+    $config.ShutdownTimeoutSeconds = ConvertTo-RequiredPositiveInt -EnvVarName 'API_SHUTDOWN_TIMEOUT_SECONDS' -Value $env:API_SHUTDOWN_TIMEOUT_SECONDS -Default $config.ShutdownTimeoutSeconds
+    $config.RateLimitEnabled = ConvertTo-RequiredBool -EnvVarName 'API_RATE_LIMIT_ENABLED' -Value $env:API_RATE_LIMIT_ENABLED -Default $config.RateLimitEnabled
+    $config.RateLimitRequests = ConvertTo-RequiredPositiveInt -EnvVarName 'API_RATE_LIMIT_REQUESTS' -Value $env:API_RATE_LIMIT_REQUESTS -Default $config.RateLimitRequests
+    $config.RateLimitWindowSeconds = ConvertTo-RequiredPositiveInt -EnvVarName 'API_RATE_LIMIT_WINDOW_SECONDS' -Value $env:API_RATE_LIMIT_WINDOW_SECONDS -Default $config.RateLimitWindowSeconds
 
     return $config
 }

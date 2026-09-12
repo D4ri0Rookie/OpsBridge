@@ -48,3 +48,71 @@ Describe 'Get-PodeLevelsAtOrAbove' {
         { Get-PodeLevelsAtOrAbove -MinLevel 'Trace' } | Should -Throw
     }
 }
+
+Describe 'Protect-AppLogData' {
+    It 'passes through a hashtable with no sensitive-looking keys unchanged' {
+        $data = @{ service = 'Windows'; operation = 'GetServices'; durationMs = 12 }
+        $result = Protect-AppLogData -Data $data
+        $result.service | Should -Be 'Windows'
+        $result.operation | Should -Be 'GetServices'
+        $result.durationMs | Should -Be 12
+    }
+
+    It 'returns $null unchanged (Write-AppLog is called with no -Data on many events)' {
+        Protect-AppLogData -Data $null | Should -BeNullOrEmpty
+    }
+
+    It 'redacts each of the documented sensitive key names (docs/logging.md)' -TestCases @(
+        @{ Key = 'Authorization' }
+        @{ Key = 'Password' }
+        @{ Key = 'Token' }
+        @{ Key = 'ApiKey' }
+        @{ Key = 'Secret' }
+        @{ Key = 'Credential' }
+        @{ Key = 'Cookie' }
+    ) {
+        param($Key)
+        $result = Protect-AppLogData -Data @{ $Key = 'super-secret-value' }
+        $result[$Key] | Should -Be '***REDACTED***'
+        $result[$Key] | Should -Not -Match 'super-secret-value'
+    }
+
+    It 'matches case-insensitively and as a substring (real header/field names)' -TestCases @(
+        @{ Key = 'authorization' }
+        @{ Key = 'AUTHORIZATION' }
+        @{ Key = 'X-Api-Key' }
+        @{ Key = 'apiKey' }
+        @{ Key = 'authToken' }
+        @{ Key = 'sessionCookie' }
+        @{ Key = 'dbPassword' }
+        @{ Key = 'clientSecret' }
+    ) {
+        param($Key)
+        (Protect-AppLogData -Data @{ $Key = 'super-secret-value' })[$Key] | Should -Be '***REDACTED***'
+    }
+
+    It 'redacts recursively inside a nested hashtable' {
+        $data = @{
+            request = @{
+                headers = @{ Authorization = 'Bearer abc123'; Accept = 'application/json' }
+            }
+        }
+        $result = Protect-AppLogData -Data $data
+        $result.request.headers.Authorization | Should -Be '***REDACTED***'
+        $result.request.headers.Accept | Should -Be 'application/json'
+    }
+
+    It 'never mutates the caller''s original hashtable' {
+        $data = @{ Password = 'hunter2' }
+        Protect-AppLogData -Data $data | Out-Null
+        $data.Password | Should -Be 'hunter2'
+    }
+
+    It 'does not redact a key that merely contains an unrelated substring' {
+        # Guards against an overly broad pattern - "count" should never match
+        # "credential"-adjacent redaction just because both contain "c".
+        $result = Protect-AppLogData -Data @{ count = 5; statusCode = 200 }
+        $result.count | Should -Be 5
+        $result.statusCode | Should -Be 200
+    }
+}

@@ -180,3 +180,30 @@ function Get-RawJsonStringField {
     }
     return $null
 }
+
+# Fires $Count real concurrent GET requests at $BaseUrl$Path and returns each
+# one's status code/body - used by tests that need genuine overlap (the
+# concurrency and rate limit tests). ForEach-Object -Parallel, not Start-Job/
+# Start-ThreadJob: those have enough per-job startup latency to spread requests
+# out over time instead of landing them together, which defeats tests that
+# specifically need overlap.
+function Invoke-ConcurrentGetRequests {
+    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('InjectionRisk.ForeachObjectInjection', '', Justification = 'Test-local server URL (the caller starts the server itself), not request/network data.')]
+    param(
+        [string]$BaseUrl,
+        [string]$Path,
+        [int]$Count
+    )
+
+    1..$Count | ForEach-Object -Parallel {
+        $url = $using:BaseUrl
+        $p = $using:Path
+        try {
+            $r = Invoke-WebRequest -Uri "$url$p" -UseBasicParsing -TimeoutSec 10
+            [pscustomobject]@{ StatusCode = [int]$r.StatusCode; Body = $null; Headers = $r.Headers }
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            [pscustomobject]@{ StatusCode = $_.Exception.Response.StatusCode.value__; Body = $_.ErrorDetails.Message; Headers = $null }
+        }
+    } -ThrottleLimit $Count
+}

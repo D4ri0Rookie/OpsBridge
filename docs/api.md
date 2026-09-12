@@ -30,12 +30,50 @@ A validation error additionally carries `details`:
 }
 ```
 
+`category` and `retryable` are optional, additive fields set on the newer
+runtime-protection errors - a client can use them to decide whether to retry:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Request rate limit exceeded.",
+    "category": "rate_limit",
+    "retryable": true,
+    "correlationId": "7c8f2c..."
+  }
+}
+```
+
+| `category`   | Meaning                                   | Seen on |
+|--------------|--------------------------------------------|---------|
+| `validation` | The request itself is invalid              | `422`, `413` |
+| `rate_limit` | Client sent too many requests              | `429` |
+| `overload`   | The server is at capacity                  | `503` (concurrency limit) |
+| `internal`   | Unexpected server-side failure             | `500` |
+
+`timeout` is reserved by the taxonomy but not currently emitted on any
+response: `API_REQUEST_TIMEOUT_SECONDS` is a soft, log-only budget (a slow
+handler is logged, not turned into an error response) - see
+[configuration.md](configuration.md#request-handler-timeout-api_request_timeout_seconds).
+
+Older error sources (`404`, the Windows service-manager `503`) omit `category`
+and `retryable` rather than being forced into a category that doesn't
+describe them - this is additive, not a breaking change to the envelope.
+
 Internal detail (stack traces, file paths, exception text, infrastructure
 names) is **never** included in a response body - it exists only in the
 structured Error log, tagged with the same `correlationId` (see
 [logging.md](logging.md)). Built with `New-ApiErrorBody` /
 `Send-ApiError` ([src/errors/Errors.ps1](../src/errors/Errors.ps1)) - every
 route uses this, no route invents its own error shape.
+
+**Exception**: a `413` (body too large) is served from a static file
+(`errors/413.json`) by Pode itself, before the correlation id middleware runs
+- it carries `code`/`message`/`category`/`retryable` but never a
+`correlationId`. This is a deliberate, documented limitation (see
+[configuration.md](configuration.md#pode-native-settings)), not an
+inconsistency to fix by hand per request.
 
 ## Correlation ID
 
@@ -128,8 +166,82 @@ Set on every response (success or error) by
 
 ## Request limits
 
-`server.psd1` caps request duration (`408` after 30s) and body size (`413`
-above 1MB) before a request reaches any route.
+`server.psd1` caps request duration (`408` after 30s, unrelated to the
+handler timeout below) and body size (`413` above `API_MAX_BODY_BYTES`,
+default 1MB) before a request reaches any route.
+
+## Request handler timeout
+
+`API_REQUEST_TIMEOUT_SECONDS` (default 30) is a **soft** budget: a handler
+that runs longer is logged (`application.timeout`, `timedOut: true` on the
+request-log entry - see [logging.md](logging.md)), not aborted - the response
+is still whatever the handler produced. See
+[configuration.md](configuration.md#request-handler-timeout-api_request_timeout_seconds)
+for why this is deliberately not a preemptive cutoff.
+
+## Rate limiting
+
+Disabled by default. When `API_RATE_LIMIT_ENABLED=true`, OpsBridge allows at
+most `API_RATE_LIMIT_REQUESTS` requests per rolling `API_RATE_LIMIT_WINDOW_SECONDS`-second
+window - a single global counter, not per-client (see
+[architecture.md](architecture.md)). Once the window's budget is used up:
+
+```json
+{
+  "error": {
+    "code": "RATE_LIMIT_EXCEEDED",
+    "message": "Request rate limit exceeded.",
+    "category": "rate_limit",
+    "retryable": true,
+    "correlationId": "7c8f2c..."
+  }
+}
+```
+
+Status `429`, with a `Retry-After` header (seconds until the window resets).
+
+## Concurrency limit
+
+OpsBridge caps the number of requests it processes at the same time
+(`API_MAX_IN_FLIGHT_REQUESTS`, default 100) - a single, global, in-process
+counter (no per-user/per-route limits, no distributed coordination; see
+[architecture.md](architecture.md)). Once at capacity, a new request gets:
+
+```json
+{
+  "error": {
+    "code": "OVERLOADED",
+    "message": "The server is at capacity. Try again later.",
+    "category": "overload",
+    "retryable": true,
+    "correlationId": "7c8f2c..."
+  }
+}
+```
+
+Status `503`. A slot frees up as soon as the request it belongs to finishes
+(success, error, or exception - see
+[src/middleware/Concurrency.ps1](../src/middleware/Concurrency.ps1)).
+
+## Shutting down
+
+Once OpsBridge receives SIGTERM/SIGINT, every new request gets:
+
+```json
+{
+  "error": {
+    "code": "SHUTTING_DOWN",
+    "message": "The server is shutting down and is not accepting new requests.",
+    "category": "overload",
+    "retryable": true,
+    "correlationId": "7c8f2c..."
+  }
+}
+```
+
+Status `503`, immediately - a request already being handled is given up to
+`API_SHUTDOWN_TIMEOUT_SECONDS` to finish normally. See
+[configuration.md](configuration.md#graceful-shutdown).
 
 ## Authentication
 

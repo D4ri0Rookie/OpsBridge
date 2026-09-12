@@ -7,18 +7,35 @@
 BeforeAll {
     . "$PSScriptRoot/../../../src/config/Config.ps1"
     $script:RootPath = 'TestDrive:/opsbridge'
+    $script:AllConfigEnvVars = @(
+        'API_ENVIRONMENT', 'API_HOST', 'API_PORT', 'API_PROTOCOL', 'API_CERT_PATH',
+        'API_CERT_SELF_SIGNED', 'API_THREADS', 'API_DAEMON',
+        'API_LOG_LEVEL', 'API_LOG_FORMAT', 'API_LOG_DESTINATION', 'API_LOG_PATH',
+        'API_LOG_RETENTION_DAYS',
+        'API_MAX_BODY_BYTES', 'API_MAX_IN_FLIGHT_REQUESTS', 'API_REQUEST_TIMEOUT_SECONDS',
+        'API_SHUTDOWN_TIMEOUT_SECONDS', 'API_RATE_LIMIT_ENABLED', 'API_RATE_LIMIT_REQUESTS',
+        'API_RATE_LIMIT_WINDOW_SECONDS'
+    )
+}
+
+AfterAll {
+    # Without this, whichever invalid override the last test in this file set
+    # (e.g. a fail-fast test's deliberately-bad value) stays in *this* process's
+    # environment after the file finishes. tests/integration spawns real server
+    # processes with Start-Process, which inherits the parent environment by
+    # default - a leaked invalid setting would then make every subsequent
+    # integration test server fail to start (fail-fast), not just this file's
+    # own tests. BeforeEach alone only protects the *next test in this file*.
+    foreach ($name in $script:AllConfigEnvVars) {
+        Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+    }
 }
 
 Describe 'Get-AppConfig' {
     BeforeEach {
         # Config reads directly from $env:*, so every test starts from a clean
         # slate regardless of what the previous test (or the host shell) set.
-        foreach ($name in @(
-                'API_ENVIRONMENT', 'API_HOST', 'API_PORT', 'API_PROTOCOL', 'API_CERT_PATH',
-                'API_CERT_SELF_SIGNED', 'API_THREADS', 'API_DAEMON',
-                'API_LOG_LEVEL', 'API_LOG_FORMAT', 'API_LOG_DESTINATION', 'API_LOG_PATH',
-                'API_LOG_RETENTION_DAYS'
-            )) {
+        foreach ($name in $script:AllConfigEnvVars) {
             Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
         }
     }
@@ -117,5 +134,129 @@ Describe 'Get-AppConfig' {
     It 'never stores a secret-shaped key in the returned config' {
         $config = Get-AppConfig -RootPath $script:RootPath
         $config.Keys | Where-Object { $_ -match 'password|secret|token|key$' } | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Get-AppConfig - hardening settings (fail-fast validation)' {
+    BeforeEach {
+        foreach ($name in @(
+                'API_ENVIRONMENT', 'API_HOST', 'API_PORT', 'API_PROTOCOL', 'API_CERT_PATH',
+                'API_CERT_SELF_SIGNED', 'API_THREADS', 'API_DAEMON',
+                'API_LOG_LEVEL', 'API_LOG_FORMAT', 'API_LOG_DESTINATION', 'API_LOG_PATH',
+                'API_LOG_RETENTION_DAYS',
+                'API_MAX_BODY_BYTES', 'API_MAX_IN_FLIGHT_REQUESTS', 'API_REQUEST_TIMEOUT_SECONDS',
+                'API_SHUTDOWN_TIMEOUT_SECONDS', 'API_RATE_LIMIT_ENABLED', 'API_RATE_LIMIT_REQUESTS',
+                'API_RATE_LIMIT_WINDOW_SECONDS'
+            )) {
+            Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'defaults every hardening setting when nothing is overridden' {
+        $config = Get-AppConfig -RootPath $script:RootPath
+        $config.MaxBodyBytes | Should -Be 1MB
+        $config.MaxInFlightRequests | Should -Be 100
+        $config.RequestTimeoutSeconds | Should -Be 30
+        $config.ShutdownTimeoutSeconds | Should -Be 30
+        $config.RateLimitEnabled | Should -BeFalse
+        $config.RateLimitRequests | Should -Be 300
+        $config.RateLimitWindowSeconds | Should -Be 60
+    }
+
+    It 'applies a valid API_MAX_BODY_BYTES override' {
+        $env:API_MAX_BODY_BYTES = '2097152'
+        (Get-AppConfig -RootPath $script:RootPath).MaxBodyBytes | Should -Be 2097152
+    }
+
+    It 'accepts API_MAX_BODY_BYTES at the boundary value of 1' {
+        $env:API_MAX_BODY_BYTES = '1'
+        (Get-AppConfig -RootPath $script:RootPath).MaxBodyBytes | Should -Be 1
+    }
+
+    It 'throws (fail-fast) on a zero API_MAX_BODY_BYTES' {
+        $env:API_MAX_BODY_BYTES = '0'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_MAX_BODY_BYTES*'
+    }
+
+    It 'throws (fail-fast) on a negative API_MAX_BODY_BYTES' {
+        $env:API_MAX_BODY_BYTES = '-1'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_MAX_BODY_BYTES*'
+    }
+
+    It 'throws (fail-fast) on a non-numeric API_MAX_BODY_BYTES' {
+        $env:API_MAX_BODY_BYTES = 'not-a-number'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_MAX_BODY_BYTES*'
+    }
+
+    It 'applies a valid API_MAX_IN_FLIGHT_REQUESTS override' {
+        $env:API_MAX_IN_FLIGHT_REQUESTS = '250'
+        (Get-AppConfig -RootPath $script:RootPath).MaxInFlightRequests | Should -Be 250
+    }
+
+    It 'accepts API_MAX_IN_FLIGHT_REQUESTS at the boundary value of 1' {
+        $env:API_MAX_IN_FLIGHT_REQUESTS = '1'
+        (Get-AppConfig -RootPath $script:RootPath).MaxInFlightRequests | Should -Be 1
+    }
+
+    It 'throws (fail-fast) on a zero API_MAX_IN_FLIGHT_REQUESTS' {
+        $env:API_MAX_IN_FLIGHT_REQUESTS = '0'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_MAX_IN_FLIGHT_REQUESTS*'
+    }
+
+    It 'throws (fail-fast) on a non-numeric API_MAX_IN_FLIGHT_REQUESTS' {
+        $env:API_MAX_IN_FLIGHT_REQUESTS = 'many'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_MAX_IN_FLIGHT_REQUESTS*'
+    }
+
+    It 'applies a valid API_REQUEST_TIMEOUT_SECONDS override' {
+        $env:API_REQUEST_TIMEOUT_SECONDS = '15'
+        (Get-AppConfig -RootPath $script:RootPath).RequestTimeoutSeconds | Should -Be 15
+    }
+
+    It 'throws (fail-fast) on a zero or negative API_REQUEST_TIMEOUT_SECONDS' {
+        $env:API_REQUEST_TIMEOUT_SECONDS = '-5'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_REQUEST_TIMEOUT_SECONDS*'
+    }
+
+    It 'applies a valid API_SHUTDOWN_TIMEOUT_SECONDS override' {
+        $env:API_SHUTDOWN_TIMEOUT_SECONDS = '45'
+        (Get-AppConfig -RootPath $script:RootPath).ShutdownTimeoutSeconds | Should -Be 45
+    }
+
+    It 'throws (fail-fast) on an invalid API_SHUTDOWN_TIMEOUT_SECONDS' {
+        $env:API_SHUTDOWN_TIMEOUT_SECONDS = '0'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_SHUTDOWN_TIMEOUT_SECONDS*'
+    }
+
+    It 'accepts API_RATE_LIMIT_ENABLED truthy/falsy spellings' {
+        $env:API_RATE_LIMIT_ENABLED = 'true'
+        (Get-AppConfig -RootPath $script:RootPath).RateLimitEnabled | Should -BeTrue
+
+        $env:API_RATE_LIMIT_ENABLED = 'off'
+        (Get-AppConfig -RootPath $script:RootPath).RateLimitEnabled | Should -BeFalse
+    }
+
+    It 'throws (fail-fast) on a non-boolean API_RATE_LIMIT_ENABLED' {
+        $env:API_RATE_LIMIT_ENABLED = 'maybe'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_RATE_LIMIT_ENABLED*'
+    }
+
+    It 'applies a valid API_RATE_LIMIT_REQUESTS / API_RATE_LIMIT_WINDOW_SECONDS override' {
+        $env:API_RATE_LIMIT_REQUESTS = '10'
+        $env:API_RATE_LIMIT_WINDOW_SECONDS = '5'
+        $config = Get-AppConfig -RootPath $script:RootPath
+        $config.RateLimitRequests | Should -Be 10
+        $config.RateLimitWindowSeconds | Should -Be 5
+    }
+
+    It 'throws (fail-fast) on an invalid API_RATE_LIMIT_REQUESTS even when rate limiting is disabled' {
+        $env:API_RATE_LIMIT_ENABLED = 'false'
+        $env:API_RATE_LIMIT_REQUESTS = '0'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_RATE_LIMIT_REQUESTS*'
+    }
+
+    It 'throws (fail-fast) on an invalid API_RATE_LIMIT_WINDOW_SECONDS' {
+        $env:API_RATE_LIMIT_WINDOW_SECONDS = 'never'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_RATE_LIMIT_WINDOW_SECONDS*'
     }
 }

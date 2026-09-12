@@ -21,7 +21,7 @@ Add-AppRoute -Method Get -Path '/api/v1/windows/services' -ScriptBlock {
     if ($WebEvent.Query.ContainsKey('name')) {
         $name = $WebEvent.Query['name']
         if ([string]::IsNullOrWhiteSpace($name)) {
-            Send-ApiError -StatusCode 422 -Code 'VALIDATION_ERROR' -Message 'The request contains invalid parameters.' -Details @(@{ field = 'name'; code = 'EMPTY' })
+            Send-ApiError -StatusCode 422 -Code 'VALIDATION_ERROR' -Message 'The request contains invalid parameters.' -Details @(@{ field = 'name'; code = 'EMPTY' }) -Category 'validation' -Retryable $false
             return
         }
         # No legitimate Windows service name comes close to 256 characters;
@@ -30,7 +30,7 @@ Add-AppRoute -Method Get -Path '/api/v1/windows/services' -ScriptBlock {
         # 404 message / logs. Mirrors the same fail-fast-on-length approach
         # the correlation id validator already uses.
         if ($name.Length -gt 256) {
-            Send-ApiError -StatusCode 422 -Code 'VALIDATION_ERROR' -Message 'The request contains invalid parameters.' -Details @(@{ field = 'name'; code = 'TOO_LONG' })
+            Send-ApiError -StatusCode 422 -Code 'VALIDATION_ERROR' -Message 'The request contains invalid parameters.' -Details @(@{ field = 'name'; code = 'TOO_LONG' }) -Category 'validation' -Retryable $false
             return
         }
     }

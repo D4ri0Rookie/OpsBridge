@@ -138,6 +138,9 @@ function Initialize-AppLogging {
         if ($logEvent.Data.ErrorType) {
             $item.errorType = $logEvent.Data.ErrorType
         }
+        if ($logEvent.Data.TimedOut) {
+            $item.timedOut = $logEvent.Data.TimedOut
+        }
         return $item
     }
 
@@ -157,6 +160,65 @@ function Initialize-AppLogging {
             metadata    = $logEvent.Metadata
         }
     }
+}
+
+function Get-AppLogSensitiveKeyPattern {
+    <#
+        A function, not a $script:/module-level constant - same cross-runspace
+        reasoning as Get-AppLogLevelMap above. Matches a key *containing* one
+        of these words (case-insensitive), so Authorization, apiKey,
+        X-Api-Key, authToken, sessionCookie, dbPassword, clientSecret etc. are
+        all caught, not just an exact-name match.
+    #>
+    [OutputType([string])]
+    param()
+    return '(authorization|password|token|api.?key|secret|credential|cookie)'
+}
+
+function Protect-AppLogData {
+    <#
+        Centralized redaction (docs/logging.md): replaces the value of any
+        key matching Get-AppLogSensitiveKeyPattern with a fixed mask,
+        recursively through nested hashtables. Called from
+        Write-AppLog/Write-AppErrorLog, so every caller is protected
+        automatically.
+
+        Key-name-based, not content scanning - a safety net against an
+        accidentally-logged field (e.g. a whole headers hashtable including
+        Authorization), not a DLP system that inspects string values.
+
+        Returns a new hashtable; never mutates $Data in place.
+    #>
+    [CmdletBinding()]
+    [OutputType([hashtable])]
+    param(
+        [Parameter()]
+        [AllowNull()]
+        [hashtable]
+        $Data
+    )
+
+    if ($null -eq $Data) {
+        return $Data
+    }
+
+    $pattern = Get-AppLogSensitiveKeyPattern
+    $result = @{}
+
+    foreach ($key in $Data.Keys) {
+        $value = $Data[$key]
+        if ("$key" -match $pattern) {
+            $result[$key] = '***REDACTED***'
+        }
+        elseif ($value -is [hashtable]) {
+            $result[$key] = Protect-AppLogData -Data $value
+        }
+        else {
+            $result[$key] = $value
+        }
+    }
+
+    return $result
 }
 
 function Write-AppLog {
@@ -184,7 +246,7 @@ function Write-AppLog {
         Timestamp     = (Get-AppTimestamp)
         Event         = $Event
         CorrelationId = (Get-CorrelationId)
-        Extra         = $Data
+        Extra         = (Protect-AppLogData -Data $Data)
     }
 
     Write-PodeLog -Name 'Application' -Level (Get-AppLogLevelMap)[$Level] -InputObject $item
@@ -208,6 +270,8 @@ function Write-AppErrorLog {
     if ($null -ne $WebEvent) {
         $metadata.route = $WebEvent.Path
     }
+
+    $metadata = Protect-AppLogData -Data $metadata
 
     if ($PSCmdlet.ParameterSetName -eq 'Exception') {
         Write-PodeErrorLog -Exception $Exception -Metadata $metadata

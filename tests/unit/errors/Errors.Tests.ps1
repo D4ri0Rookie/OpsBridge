@@ -49,4 +49,27 @@ Describe 'New-ApiErrorBody' {
         ($body.error.Keys) | Should -Not -Contain 'exception'
         $body.error.message | Should -Not -Match '\.ps1'
     }
+
+    It 'omits category and retryable when neither is supplied (backward compatible envelope)' {
+        $body = New-ApiErrorBody -Code 'NOT_FOUND' -Message 'Resource not found.'
+        $body.error.Contains('category') | Should -BeFalse
+        $body.error.Contains('retryable') | Should -BeFalse
+    }
+
+    It 'includes category when supplied' {
+        $body = New-ApiErrorBody -Code 'RATE_LIMIT_EXCEEDED' -Message 'Request rate limit exceeded.' -Category 'rate_limit'
+        $body.error.category | Should -Be 'rate_limit'
+    }
+
+    It 'includes retryable as a real boolean, not a string, when supplied' {
+        $body = New-ApiErrorBody -Code 'RATE_LIMIT_EXCEEDED' -Message 'Request rate limit exceeded.' -Retryable $true
+        $body.error.retryable | Should -BeOfType [bool]
+        $body.error.retryable | Should -BeTrue
+    }
+
+    It 'includes retryable = $false explicitly, not omitting it as falsy' {
+        $body = New-ApiErrorBody -Code 'VALIDATION_ERROR' -Message 'The request contains invalid parameters.' -Retryable $false
+        $body.error.Contains('retryable') | Should -BeTrue
+        $body.error.retryable | Should -BeFalse
+    }
 }

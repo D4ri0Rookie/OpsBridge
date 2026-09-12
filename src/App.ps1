@@ -145,6 +145,61 @@ function Test-HttpsCertificateReady {
     return (-not [string]::IsNullOrWhiteSpace($CertPath)) -and (Test-Path -Path $CertPath -PathType Leaf)
 }
 
+function New-RuntimeServerConfigFile {
+    <#
+        Only called when API_MAX_BODY_BYTES overrides the default. Pode reads
+        Server.Request.BodySize once from its config file, before this
+        script's own -ScriptBlock runs, and there is no cmdlet to change it
+        afterwards - so this writes a copy of server.psd1 with just BodySize
+        swapped, and starts Pode with -ConfigFile pointing at it. Reuses
+        Pode's own size check (correct for chunked requests, which have no
+        Content-Length to pre-check) instead of reimplementing it ourselves.
+
+        -ConfigFile replaces the default server.psd1 lookup, it doesn't merge
+        with it (docs/configuration.md), so this copies the whole file, not
+        just the Request block. Written to a process-unique temp path so
+        several test servers running at once never collide, and deleted once
+        the server stops (Start-ApplicationServer's finally block).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]
+        $RootPath,
+
+        [Parameter(Mandatory = $true)]
+        [int]
+        $MaxBodyBytes
+    )
+
+    $baseConfig = Import-PowerShellDataFile -Path (Join-Path $RootPath 'server.psd1')
+    $timeout = [int]$baseConfig.Server.Request.Timeout
+    $errorPagesDefault = $baseConfig.Web.ErrorPages.Default
+    $showExceptions = if ([bool]$baseConfig.Web.ErrorPages.ShowExceptions) { '$true' } else { '$false' }
+
+    $content = @"
+@{
+    Server = @{
+        Request = @{
+            Timeout  = $timeout
+            BodySize = $MaxBodyBytes
+        }
+    }
+    Web = @{
+        ErrorPages = @{
+            Default        = '$errorPagesDefault'
+            ShowExceptions = $showExceptions
+        }
+    }
+}
+"@
+
+    $path = Join-Path ([System.IO.Path]::GetTempPath()) "opsbridge-server-$PID.psd1"
+    Set-Content -Path $path -Value $content -Encoding utf8 -NoNewline
+    return $path
+}
+
 function New-WrappedRouteScriptBlock {
     <#
         Builds the actual scriptblock Add-AppRoute registers with Pode: the
@@ -195,13 +250,32 @@ function New-WrappedRouteScriptBlock {
     $handlerText = $ScriptBlock.ToString()
 
     return [scriptblock]::Create(@"
+`$__handlerStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 try {
 $handlerText
 }
 catch {
     `$__handlerError = `$_
     try { Write-AppErrorLog -Exception `$__handlerError.Exception } catch { `$null = `$_ }
-    Send-ApiError -StatusCode 500 -Code 'INTERNAL_ERROR' -Message 'An unexpected error occurred.'
+    Send-ApiError -StatusCode 500 -Code 'INTERNAL_ERROR' -Message 'An unexpected error occurred.' -Category 'internal' -Retryable `$false
+}
+finally {
+    # API_REQUEST_TIMEOUT_SECONDS (docs/configuration.md) is a *soft* budget:
+    # logged when exceeded, not enforced. Aborting a running handler would
+    # need a runspace per request - real overhead for a hang scenario no
+    # current route can hit. This still logs a handler that is slow but does
+    # return.
+    `$__handlerStopwatch.Stop()
+    try {
+        `$__timeoutSeconds = (Get-PodeState -Name 'AppConfig').RequestTimeoutSeconds
+        if (`$__handlerStopwatch.Elapsed.TotalSeconds -gt `$__timeoutSeconds) {
+            Write-AppLog -Level Warning -Event 'application.timeout' -Data @{ path = "`$(`$WebEvent.Path)"; durationMs = [math]::Round(`$__handlerStopwatch.Elapsed.TotalMilliseconds, 2); timeoutSeconds = `$__timeoutSeconds }
+            if (`$null -ne `$WebEvent -and `$null -ne `$WebEvent.Data) {
+                `$WebEvent.Data.TimedOut = `$true
+            }
+        }
+    }
+    catch { `$null = `$_ }
 }
 "@)
 }
@@ -332,7 +406,17 @@ function Start-ApplicationServer {
     # deterministic for a given environment. Warnings are suppressed here and
     # re-logged, once, through the structured log inside the server.
     . (Join-Path $RootPath 'src/config/Config.ps1')
-    $bootConfig = Get-AppConfig -RootPath $RootPath -WarningAction SilentlyContinue
+    try {
+        $bootConfig = Get-AppConfig -RootPath $RootPath -WarningAction SilentlyContinue
+    }
+    catch {
+        # Get-AppConfig throws for the hardening settings (docs/configuration.md)
+        # instead of discarding-with-warning, so a bad value must abort
+        # startup here, not surface as a raw exception.
+        Write-BootstrapLog -Level Error -Message "Cannot start: invalid configuration - $($_.Exception.Message)"
+        try { $Host.SetShouldExit(1) } catch { $null = $_ }
+        exit 1
+    }
 
     if (-not (Test-ListenPortAvailable -Address $bootConfig.ListenAddress -Port $bootConfig.Port)) {
         Write-BootstrapLog -Level Error -Message "Cannot start: $($bootConfig.ListenAddress):$($bootConfig.Port) is already in use. Set API_PORT to a free port or stop the process holding it."
@@ -348,11 +432,34 @@ function Start-ApplicationServer {
         exit 1
     }
 
+    # Only generated when API_MAX_BODY_BYTES overrides the default - the common
+    # case (no override) loads server.psd1 exactly as before, unchanged.
+    # See New-RuntimeServerConfigFile for why this needs a real config file
+    # rather than a runtime setter.
+    $runtimeConfigPath = $null
+    if ($env:API_MAX_BODY_BYTES) {
+        $runtimeConfigPath = New-RuntimeServerConfigFile -RootPath $RootPath -MaxBodyBytes $bootConfig.MaxBodyBytes
+    }
+
+    # Must be registered before Start-PodeServer (which blocks until
+    # shutdown) - see src/middleware/Shutdown.ps1 for why a real server
+    # process, not a unit test dot-sourcing this file, is the only caller.
+    . (Join-Path $RootPath 'src/middleware/Shutdown.ps1')
+    Register-AppShutdownSignalHandler
+
     try {
         # -Daemon:$false is a no-op; -Daemon:$true runs Pode in background/service
         # mode (minimal console interaction), driven by API_DAEMON (set by
         # scripts/install-service.ps1 for the Windows service).
-        Start-PodeServer -RootPath $RootPath -Threads $bootConfig.Threads -Daemon:$bootConfig.Daemon -ScriptBlock {
+        $startServerParams = @{
+            RootPath = $RootPath
+            Threads  = $bootConfig.Threads
+            Daemon   = $bootConfig.Daemon
+        }
+        if ($runtimeConfigPath) {
+            $startServerParams.ConfigFile = $runtimeConfigPath
+        }
+        $startServerParams.ScriptBlock = {
 
             $root = Get-PodeServerPath
 
@@ -368,6 +475,9 @@ function Start-ApplicationServer {
                 'src/logging/Logging.ps1'
                 'src/middleware/RequestLogging.ps1'
                 'src/middleware/SecurityHeaders.ps1'
+                'src/middleware/Shutdown.ps1'
+                'src/middleware/RateLimit.ps1'
+                'src/middleware/Concurrency.ps1'
                 # App.ps1 itself: Start-PodeServer's -ScriptBlock runs inside
                 # Pode's own session state, not the caller's, so Add-AppRoute /
                 # Register-ApplicationRoutes / Register-ApplicationServices
@@ -383,6 +493,16 @@ function Start-ApplicationServer {
             # --- configuration -------------------------------------------------
             $config = Get-AppConfig -RootPath $root -WarningVariable configWarnings -WarningAction SilentlyContinue
             Set-PodeState -Name 'AppConfig' -Value $config -NoPassThru
+
+            # A SemaphoreSlim, not a plain counter: Get-PodeState returns this
+            # exact object in every runspace, and only its own Wait()/Release()
+            # are safe to call concurrently from multiple threads (see
+            # src/middleware/Concurrency.ps1).
+            Set-PodeState -Name 'ConcurrencySemaphore' -Value ([System.Threading.SemaphoreSlim]::new($config.MaxInFlightRequests, $config.MaxInFlightRequests)) -NoPassThru
+
+            # A synchronized hashtable, not a plain one: src/middleware/RateLimit.ps1
+            # locks its own SyncRoot around the check-reset-increment sequence.
+            Set-PodeState -Name 'RateLimitState' -Value ([hashtable]::Synchronized(@{ Count = 0; WindowStart = [datetime]::UtcNow })) -NoPassThru
 
             # --- logging -----------------------------------------------------
             Initialize-AppLogging -Config $config
@@ -435,13 +555,19 @@ function Start-ApplicationServer {
             }
 
             # --- middleware -------------------------------------------------
-            # Order matters (docs/architecture.md): correlation id first so every
-            # subsequent log line and error response can carry it, then security
-            # headers. The request-log endware runs at the end regardless of how
-            # the request finished.
+            # Order matters (docs/architecture.md): correlation id and security
+            # headers first, so even a rejection below still carries them.
+            # Then the shutdown gate, then rate limiting, then concurrency - a
+            # rate-limited request should not also take a concurrency slot.
+            # The endware pair runs at the end, regardless of outcome.
             Add-CorrelationIdMiddleware
             Add-SecurityHeadersMiddleware
+            Add-ShutdownGateMiddleware
+            Add-RateLimitMiddleware
+            Add-ConcurrencyLimitMiddleware
+            Add-ShutdownWatcherTimer
             Add-RequestLoggingEndware
+            Add-ConcurrencyReleaseEndware
 
             # --- services ----------------------------------------------------
             Register-ApplicationServices -Path (Join-Path $root 'src/services') -RootPath $root
@@ -452,11 +578,15 @@ function Start-ApplicationServer {
             Register-ApplicationRoutes -Path (Join-Path $root 'src/routes')
 
             # --- shutdown --------------------------------------------------
-            # Pode fires Terminate just before it stops serving. Log one
-            # structured line so a normal shutdown shows up in the Application
-            # log (Write-BootstrapLog only covers the outer "Server stopped"
-            # line, after Pode itself has already torn down).
+            # Pode fires Terminate just before it stops serving, listeners
+            # still up. Wait-AppShutdownDrain (src/middleware/Shutdown.ps1)
+            # blocks here until every in-flight request finishes or
+            # API_SHUTDOWN_TIMEOUT_SECONDS elapses, then this logs one line so
+            # a normal shutdown shows up in the Application log
+            # (Write-BootstrapLog only logs the later "Server stopped" line,
+            # after Pode has torn down).
             Register-PodeEvent -Type Terminate -Name 'AppShutdownLog' -ScriptBlock {
+                Wait-AppShutdownDrain
                 Write-AppLog -Level Info -Event 'application.stopped'
             }
 
@@ -465,6 +595,8 @@ function Start-ApplicationServer {
             $scheme = $config.Protocol.ToLowerInvariant()
             Write-AppLog -Level Info -Event 'application.ready' -Data @{ url = "$($scheme)://$($config.ListenAddress):$($config.Port)" }
         }
+
+        Start-PodeServer @startServerParams
     }
     catch {
         Write-BootstrapLog -Level Error -Message "Server error: $($_.Exception.Message)"
@@ -472,6 +604,9 @@ function Start-ApplicationServer {
         exit 1
     }
     finally {
+        if ($runtimeConfigPath) {
+            Remove-Item -Path $runtimeConfigPath -ErrorAction SilentlyContinue
+        }
         Write-BootstrapLog -Level Info -Message 'Server stopped'
     }
 }

@@ -79,3 +79,68 @@ Describe 'New-WrappedRouteScriptBlock' {
         Should -Invoke Send-ApiError -Times 1 -ParameterFilter { $StatusCode -eq 500 }
     }
 }
+
+Describe 'New-WrappedRouteScriptBlock - soft request timeout (API_REQUEST_TIMEOUT_SECONDS)' {
+    It 'logs application.timeout when the handler runs past the configured budget' {
+        # RequestTimeoutSeconds = 0 rather than a real Start-Sleep past a
+        # realistic (>=1s) budget - any nonzero elapsed time already exceeds
+        # it, so this stays a fast unit test.
+        Mock Get-PodeState { @{ RequestTimeoutSeconds = 0 } } -ParameterFilter { $Name -eq 'AppConfig' }
+        Mock Write-AppLog {}
+
+        $sb = { Start-Sleep -Milliseconds 5 }
+        $wrapped = New-WrappedRouteScriptBlock -Method @('Get') -Path '/test' -ScriptBlock $sb
+        & $wrapped
+
+        Should -Invoke Write-AppLog -Times 1 -ParameterFilter {
+            $Event -eq 'application.timeout'
+        }
+    }
+
+    It 'does not log application.timeout when the handler finishes within budget' {
+        Mock Get-PodeState { @{ RequestTimeoutSeconds = 30 } } -ParameterFilter { $Name -eq 'AppConfig' }
+        Mock Write-AppLog {}
+
+        $sb = { Write-Output 'ok' }
+        $wrapped = New-WrappedRouteScriptBlock -Method @('Get') -Path '/test' -ScriptBlock $sb
+        & $wrapped | Out-Null
+
+        Should -Invoke Write-AppLog -Times 0 -ParameterFilter {
+            $Event -eq 'application.timeout'
+        }
+    }
+
+    It 'still returns the handler''s own output - a soft timeout never blocks or alters the response' {
+        Mock Get-PodeState { @{ RequestTimeoutSeconds = 0 } } -ParameterFilter { $Name -eq 'AppConfig' }
+        Mock Write-AppLog {}
+
+        $sb = { Start-Sleep -Milliseconds 5; Write-Output 'still ok' }
+        $wrapped = New-WrappedRouteScriptBlock -Method @('Get') -Path '/test' -ScriptBlock $sb
+
+        & $wrapped | Should -Be 'still ok'
+    }
+
+    It 'still sends the generic 500 for a handler that both throws and exceeds its timeout budget' {
+        Mock Get-PodeState { @{ RequestTimeoutSeconds = 0 } } -ParameterFilter { $Name -eq 'AppConfig' }
+        Mock Write-AppLog {}
+        Mock Write-AppErrorLog {}
+        Mock Send-ApiError {}
+
+        $sb = { Start-Sleep -Milliseconds 5; throw 'boom' }
+        $wrapped = New-WrappedRouteScriptBlock -Method @('Get') -Path '/test' -ScriptBlock $sb
+
+        { & $wrapped } | Should -Not -Throw
+        Should -Invoke Send-ApiError -Times 1 -ParameterFilter { $StatusCode -eq 500 }
+        Should -Invoke Write-AppLog -Times 1 -ParameterFilter { $Event -eq 'application.timeout' }
+    }
+
+    It 'never breaks the response even if reading the timeout budget itself fails' {
+        Mock Get-PodeState { throw 'state backend unavailable' } -ParameterFilter { $Name -eq 'AppConfig' }
+        Mock Write-AppLog {}
+
+        $sb = { Write-Output 'ok' }
+        $wrapped = New-WrappedRouteScriptBlock -Method @('Get') -Path '/test' -ScriptBlock $sb
+
+        & $wrapped | Should -Be 'ok'
+    }
+}

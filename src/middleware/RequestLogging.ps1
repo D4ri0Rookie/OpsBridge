@@ -65,6 +65,12 @@ function Add-RequestLoggingEndware {
                 StatusCode    = $statusCode
                 DurationMs    = $durationMs
             }
+            if ($WebEvent.Data.TimedOut) {
+                # Set by src/App.ps1's route wrapper when a handler ran past
+                # API_REQUEST_TIMEOUT_SECONDS - a soft budget, so this marks a
+                # slow request in the log without changing its status code.
+                $item.TimedOut = $true
+            }
 
             Write-PodeLog -Name 'RequestLog' -Level $(if ($failed) { 'Error' } else { 'Informational' }) -InputObject $item
         }

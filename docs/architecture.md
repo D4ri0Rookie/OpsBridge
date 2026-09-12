@@ -10,17 +10,32 @@ HTTP runtime only - it does not become a general web framework here.
 %%{init: {"flowchart": {"curve": "basis"}}}%%
 flowchart TB
     Client(["Client"]) --> Pode["Pode HTTP server"]
-    Pode --> Corr["Middleware: Correlation ID"]
-    Corr --> Sec["Middleware: Security headers"]
-    Sec --> Route{"Route matched?"}
+    Pode --> Corr["Correlation ID"]
+    Corr --> Sec["Security headers"]
+    Sec --> Gates{"Shutting down? Over the\nrate/concurrency limit?"}
+    Gates -->|yes| Reject["Reject: 503 / 429"]
+    Gates -->|no| Route{"Route matched?"}
     Route -->|yes| Handler["Route handler (src/routes)"]
     Route -->|no| NotFound["Catch-all route -> 404"]
     Handler --> Service["Service (src/services/<Area>)"]
     Service --> External["External system\n(Windows, AD, vCenter, Azure, Exchange, ...)"]
     Handler --> Log["Request-log endware"]
     NotFound --> Log
+    Reject --> Log
     Log --> Response(["HTTP response"])
+
+    classDef gate fill:#fff3cd,stroke:#b38600,color:#3a2e00
+    classDef reject fill:#f8d7da,stroke:#b02a37,color:#4a0d13
+    classDef external fill:#e2e3e5,stroke:#6c757d,color:#3a3d40,stroke-dasharray: 4 3
+    class Gates gate
+    class Reject reject
+    class External external
 ```
+
+Shutdown/rate limit/concurrency each run as their own middleware, in that
+order, right after Security headers - drawn as one decision above to keep the
+diagram simple; see [Layer responsibilities](#layer-responsibilities) below
+for the exact order.
 
 ## Layer responsibilities
 
@@ -28,9 +43,11 @@ flowchart TB
   Configured in `server.psd1` (request timeout/body size, error page defaults)
   and started from `src/App.ps1`.
 - **Middleware** (`src/middleware/`) - cross-cutting concerns only: correlation
-  id, security headers, request logging. Runs in this order for every request:
-  Correlation ID -> Security Headers -> (future: Authentication ->
-  Authorization) -> Request Logging.
+  id, security headers, the shutdown gate, rate limiting, the in-flight
+  concurrency gate, request logging. Runs in this order for every request:
+  Correlation ID -> Security Headers -> Shutdown gate -> Rate limit ->
+  Concurrency limit -> (future: Authentication -> Authorization) -> route ->
+  Request Logging / Concurrency release (endware, always runs).
 - **Routes** (`src/routes/`, `src/routes/v1/`) - thin: HTTP method + path,
   request validation, call one service function, map its result to an HTTP
   status code and body. No automation logic lives in a route file.
@@ -105,8 +122,12 @@ regression like this one would fail that test, not just a live request.
   of lines that only `src/App.ps1` calls - `App.ps1` itself is the one file
   that stays flat at the top of `src/`, since it is the orchestrator, not a
   concern with its own boundary.
-- **No rate limiting.** Explicitly out of scope for this version - remove any
-  attempt to reintroduce it without a concrete, current requirement.
+- **No per-identity or distributed rate limiting.** The rate limiter
+  (`src/middleware/RateLimit.ps1`, `API_RATE_LIMIT_*`) is a single global
+  in-process counter, disabled by default - it protects the process itself,
+  not per-user/per-capability quotas. Redis-backed or per-client limiting is a
+  distinct, later concern - do not fold it into this mechanism without a
+  concrete, current requirement.
 - **No UI dependency.** OpsBridge is REST-first: every route under `/api/v1/*`
   and `/health/*` works with no HTML surface at all. A `/` status page may be
   added later as a pure addition, not a dependency.

@@ -142,3 +142,28 @@ Describe 'Request log content' {
         $entry.statusCode | Should -Be 404
     }
 }
+
+Describe 'Sensitive data redaction (docs/logging.md)' {
+    It 'never writes an Authorization/Cookie header value to the request or application logs' {
+        # OpsBridge does not log request headers today, so this also proves
+        # that baseline; Protect-AppLogData itself (src/logging/Logging.ps1)
+        # is unit-tested directly (tests/unit/logging/Logging.Tests.ps1) for
+        # the redaction logic a future call site would rely on.
+        $id = "logging-test-redact-$([guid]::NewGuid().ToString('N'))"
+        $secretToken = "super-secret-$([guid]::NewGuid().ToString('N'))"
+
+        Invoke-WebRequest -Uri "$script:BaseUrl/health/live" -Headers @{
+            'X-Correlation-ID' = $id
+            'Authorization'    = "Bearer $secretToken"
+            'Cookie'           = "session=$secretToken"
+        } -UseBasicParsing | Out-Null
+
+        $entry = Wait-ForLogEntry -LogsPath $script:LogsPath -FileFilter 'requests_*.log' -Contains "`"correlationId`":`"$id`""
+        $entry | Should -Not -BeNullOrEmpty
+        $entry.RawLine | Should -Not -Match ([regex]::Escape($secretToken))
+
+        Get-ChildItem -Path $script:LogsPath -Filter 'application_*.log' -File |
+            Get-Content |
+            Should -Not -Match ([regex]::Escape($secretToken))
+    }
+}
