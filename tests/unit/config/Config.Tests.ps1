@@ -14,7 +14,7 @@ BeforeAll {
         'API_LOG_RETENTION_DAYS',
         'API_MAX_BODY_BYTES', 'API_MAX_IN_FLIGHT_REQUESTS', 'API_REQUEST_TIMEOUT_SECONDS',
         'API_SHUTDOWN_TIMEOUT_SECONDS', 'API_RATE_LIMIT_ENABLED', 'API_RATE_LIMIT_REQUESTS',
-        'API_RATE_LIMIT_WINDOW_SECONDS'
+        'API_RATE_LIMIT_WINDOW_SECONDS', 'API_AUTH_ENABLED', 'API_AUTH_KEYS'
     )
 }
 
@@ -119,6 +119,35 @@ Describe 'Get-AppConfig' {
         (Get-AppConfig -RootPath $script:RootPath).Daemon | Should -BeFalse
     }
 
+    It 'applies a valid API_LOG_LEVEL override' {
+        $env:API_LOG_LEVEL = 'Debug'
+        (Get-AppConfig -RootPath $script:RootPath).LogLevel | Should -Be 'Debug'
+    }
+
+    It 'rejects an unsupported API_LOG_LEVEL and keeps the default' {
+        $env:API_LOG_LEVEL = 'Trace'
+        $config = Get-AppConfig -RootPath $script:RootPath -WarningVariable warnings -WarningAction SilentlyContinue
+        $config.LogLevel | Should -Be 'Info'
+        $warnings.Count | Should -BeGreaterThan 0
+    }
+
+    It 'applies a valid API_THREADS override' {
+        $env:API_THREADS = '8'
+        (Get-AppConfig -RootPath $script:RootPath).Threads | Should -Be 8
+    }
+
+    It 'rejects a non-numeric API_THREADS and keeps the default' {
+        $env:API_THREADS = 'many'
+        $config = Get-AppConfig -RootPath $script:RootPath -WarningAction SilentlyContinue
+        $config.Threads | Should -Be 3
+    }
+
+    It 'rejects a zero/negative API_THREADS and keeps the default' {
+        $env:API_THREADS = '0'
+        $config = Get-AppConfig -RootPath $script:RootPath -WarningAction SilentlyContinue
+        $config.Threads | Should -Be 3
+    }
+
     It 'rejects an unsupported API_LOG_FORMAT and keeps the default' {
         $env:API_LOG_FORMAT = 'text'
         $config = Get-AppConfig -RootPath $script:RootPath -WarningAction SilentlyContinue
@@ -146,7 +175,7 @@ Describe 'Get-AppConfig - hardening settings (fail-fast validation)' {
                 'API_LOG_RETENTION_DAYS',
                 'API_MAX_BODY_BYTES', 'API_MAX_IN_FLIGHT_REQUESTS', 'API_REQUEST_TIMEOUT_SECONDS',
                 'API_SHUTDOWN_TIMEOUT_SECONDS', 'API_RATE_LIMIT_ENABLED', 'API_RATE_LIMIT_REQUESTS',
-                'API_RATE_LIMIT_WINDOW_SECONDS'
+                'API_RATE_LIMIT_WINDOW_SECONDS', 'API_AUTH_ENABLED', 'API_AUTH_KEYS'
             )) {
             Remove-Item "Env:\$name" -ErrorAction SilentlyContinue
         }
@@ -161,6 +190,7 @@ Describe 'Get-AppConfig - hardening settings (fail-fast validation)' {
         $config.RateLimitEnabled | Should -BeFalse
         $config.RateLimitRequests | Should -Be 300
         $config.RateLimitWindowSeconds | Should -Be 60
+        $config.AuthEnabled | Should -BeFalse
     }
 
     It 'applies a valid API_MAX_BODY_BYTES override' {
@@ -258,5 +288,35 @@ Describe 'Get-AppConfig - hardening settings (fail-fast validation)' {
     It 'throws (fail-fast) on an invalid API_RATE_LIMIT_WINDOW_SECONDS' {
         $env:API_RATE_LIMIT_WINDOW_SECONDS = 'never'
         { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_RATE_LIMIT_WINDOW_SECONDS*'
+    }
+
+    It 'accepts API_AUTH_ENABLED truthy/falsy spellings' {
+        $env:API_AUTH_ENABLED = 'true'
+        $env:API_AUTH_KEYS = 'some-key'
+        (Get-AppConfig -RootPath $script:RootPath).AuthEnabled | Should -BeTrue
+
+        $env:API_AUTH_ENABLED = 'off'
+        (Get-AppConfig -RootPath $script:RootPath).AuthEnabled | Should -BeFalse
+    }
+
+    It 'throws (fail-fast) on a non-boolean API_AUTH_ENABLED' {
+        $env:API_AUTH_ENABLED = 'maybe'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_AUTH_ENABLED*'
+    }
+
+    It 'throws (fail-fast) when API_AUTH_ENABLED is true but API_AUTH_KEYS is not set' {
+        $env:API_AUTH_ENABLED = 'true'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_AUTH_KEYS*'
+    }
+
+    It 'throws (fail-fast) when API_AUTH_ENABLED is true but API_AUTH_KEYS is blank' {
+        $env:API_AUTH_ENABLED = 'true'
+        $env:API_AUTH_KEYS = '   '
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Throw '*API_AUTH_KEYS*'
+    }
+
+    It 'does not require API_AUTH_KEYS when auth is disabled' {
+        $env:API_AUTH_ENABLED = 'false'
+        { Get-AppConfig -RootPath $script:RootPath } | Should -Not -Throw
     }
 }

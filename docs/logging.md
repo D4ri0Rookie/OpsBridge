@@ -54,7 +54,7 @@ One line per lifecycle/service/external-dependency event, written with
   "application": "OpsBridge",
   "environment": "Production",
   "correlationId": null,
-  "appVersion": "0.2.0",
+  "appVersion": "0.5.0",
   "listenAddress": "0.0.0.0",
   "port": 8080,
   "protocol": "Https"
@@ -95,9 +95,22 @@ One line per HTTP request/response, written by the endware in
   "method": "GET",
   "path": "/api/v1/windows/services",
   "statusCode": 200,
-  "durationMs": 143
+  "durationMs": 143,
+  "clientIp": "127.0.0.1"
 }
 ```
+
+`clientIp` is the remote socket address Pode accepted the connection from
+(see `Get-ClientIp`, [src/middleware/RequestLogging.ps1](../src/middleware/RequestLogging.ps1))
+- `null` if it could not be determined. Not `X-Forwarded-For`-aware: behind a
+reverse proxy this is the proxy's address, not the original client's.
+
+`errorType` is added on any non-2xx response - the same `code` already
+returned in the error body (e.g. `VALIDATION_ERROR`, `OVERLOADED`,
+`NOT_FOUND`), set once by `Send-ApiError`
+([src/errors/Errors.ps1](../src/errors/Errors.ps1)) so every error source
+(routes, middleware) gets it for free. Lets an error rate be queried straight
+off the request log, without joining to the Error log.
 
 `timedOut: true` is added when the handler ran past `API_REQUEST_TIMEOUT_SECONDS`
 (default 30s) - a soft, log-only budget (see

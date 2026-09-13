@@ -34,6 +34,42 @@ Describe 'GET /api/v1/windows/services - validation' {
             $body.error.details[0].field | Should -Be 'name'
             $body.error.details[0].code | Should -Be 'EMPTY'
             $body.error.correlationId | Should -Not -BeNullOrEmpty
+            # docs/api.md: category/retryable are part of the public contract
+            # for a validation error, not just code/details.
+            $body.error.category | Should -Be 'validation'
+            $body.error.retryable | Should -BeFalse
+        }
+    }
+
+    It 'echoes a client-supplied correlation id in both the header and the error body' {
+        # tests/integration/Api.Tests.ps1 proves this for a success response
+        # and for the catch-all 404; this is the one business-error path
+        # (Send-ApiError via a route, not the catch-all) where it was never
+        # actually asserted that the header and body.error.correlationId
+        # agree, rather than merely each being non-empty.
+        $id = 'contract-test-correlation-id'
+        try {
+            Invoke-WebRequest -Uri "$script:BaseUrl/api/v1/windows/services?name=" -Headers @{ 'X-Correlation-ID' = $id } -UseBasicParsing
+            throw 'Expected the request to fail with 422'
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            $resp = $_.Exception.Response
+            (Get-ErrorHeaderValue $resp 'X-Correlation-ID') | Should -Be $id
+            ($_.ErrorDetails.Message | ConvertFrom-Json).error.correlationId | Should -Be $id
+        }
+    }
+
+    It 'returns 422 VALIDATION_ERROR with details when name is only whitespace' {
+        try {
+            Invoke-WebRequest -Uri "$script:BaseUrl/api/v1/windows/services?name=%20%20%20" -UseBasicParsing
+            throw 'Expected the request to fail with 422'
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            $_.Exception.Response.StatusCode.value__ | Should -Be 422
+            $body = $_.ErrorDetails.Message | ConvertFrom-Json
+            $body.error.code | Should -Be 'VALIDATION_ERROR'
+            $body.error.details[0].field | Should -Be 'name'
+            $body.error.details[0].code | Should -Be 'EMPTY'
         }
     }
 
@@ -90,6 +126,12 @@ Describe 'GET /api/v1/windows/services - platform behaviour' {
             $body = $_.ErrorDetails.Message | ConvertFrom-Json
             $body.error.code | Should -Be 'WINDOWS_SERVICE_MANAGER_UNAVAILABLE'
             $body.error.correlationId | Should -Not -BeNullOrEmpty
+            # docs/api.md: an "older" error source is left uncategorized rather
+            # than force-fit into category/retryable - this locks that
+            # omission in as intentional, not an oversight a future change
+            # could silently fill in.
+            $body.error.PSObject.Properties.Name | Should -Not -Contain 'category'
+            $body.error.PSObject.Properties.Name | Should -Not -Contain 'retryable'
         }
     }
 }

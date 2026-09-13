@@ -64,6 +64,12 @@ function Add-RequestLoggingEndware {
                 Path          = "$($WebEvent.Path)"
                 StatusCode    = $statusCode
                 DurationMs    = $durationMs
+                ClientIp      = (Get-ClientIp)
+            }
+            if ($WebEvent.Data.ErrorType) {
+                # Set by Send-ApiError (src/errors/Errors.ps1) - present on every
+                # non-2xx response, absent on success.
+                $item.ErrorType = $WebEvent.Data.ErrorType
             }
             if ($WebEvent.Data.TimedOut) {
                 # Set by src/App.ps1's route wrapper when a handler ran past

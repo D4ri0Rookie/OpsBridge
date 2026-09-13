@@ -122,6 +122,14 @@ function Send-ApiError {
         $correlationId = Get-CorrelationId
     }
 
+    # Mirrors this error's code onto the request, so the request-log endware
+    # (src/middleware/RequestLogging.ps1) can carry it as errorType without
+    # every error source (routes, middleware) having to set it separately -
+    # Send-ApiError is the one place every error response passes through.
+    if ($null -ne $WebEvent -and $null -ne $WebEvent.Data) {
+        $WebEvent.Data.ErrorType = $Code
+    }
+
     $body = New-ApiErrorBody -Code $Code -Message $Message -CorrelationId $correlationId -Details $Details -Category $Category -Retryable $Retryable
 
     Set-PodeResponseStatus -Code $StatusCode -Description $Message -NoErrorPage

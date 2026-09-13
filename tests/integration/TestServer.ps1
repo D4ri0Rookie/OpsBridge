@@ -74,6 +74,12 @@ function Start-TestServer {
     $attempts = 0
     while (-not $ready -and $attempts -lt 40) {
         $attempts++
+        # A fail-fast config error (docs/configuration.md) exits the process
+        # almost immediately - no point polling for up to 20s (40 * 500ms) for
+        # a health check that will never succeed once it has already exited.
+        if ($process.HasExited) {
+            break
+        }
         Start-Sleep -Milliseconds 500
         try {
             Invoke-RestMethod @readyCheckParams | Out-Null
@@ -83,6 +89,9 @@ function Start-TestServer {
     }
 
     if (-not $ready) {
+        if ($process.HasExited) {
+            throw "Server on port $port exited during startup (exit code $($process.ExitCode)). Check $stdErrLog"
+        }
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Server on port $port did not become ready in time. Check $stdErrLog"
     }

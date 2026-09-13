@@ -134,6 +134,7 @@ function Initialize-AppLogging {
             path          = $logEvent.Data.Path
             statusCode    = $logEvent.Data.StatusCode
             durationMs    = $logEvent.Data.DurationMs
+            clientIp      = $logEvent.Data.ClientIp
         }
         if ($logEvent.Data.ErrorType) {
             $item.errorType = $logEvent.Data.ErrorType

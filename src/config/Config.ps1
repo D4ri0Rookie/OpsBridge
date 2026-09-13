@@ -100,7 +100,7 @@ function Get-AppConfig {
     )
 
     $config = [ordered]@{
-        AppVersion       = '0.2.0'
+        AppVersion       = '0.5.0'
         Environment      = 'Development'   # Development, Test, Production
         ListenAddress    = '0.0.0.0'       # container-friendly default
         Port             = 8080
@@ -123,6 +123,7 @@ function Get-AppConfig {
         RateLimitEnabled        = $false
         RateLimitRequests       = 300     # requests allowed per window, when enabled
         RateLimitWindowSeconds  = 60
+        AuthEnabled             = $false  # API_AUTH_KEYS (a secret) is deliberately not stored here - see below
     }
 
     if ($env:API_ENVIRONMENT) {
@@ -247,6 +248,19 @@ function Get-AppConfig {
     $config.RateLimitEnabled = ConvertTo-RequiredBool -EnvVarName 'API_RATE_LIMIT_ENABLED' -Value $env:API_RATE_LIMIT_ENABLED -Default $config.RateLimitEnabled
     $config.RateLimitRequests = ConvertTo-RequiredPositiveInt -EnvVarName 'API_RATE_LIMIT_REQUESTS' -Value $env:API_RATE_LIMIT_REQUESTS -Default $config.RateLimitRequests
     $config.RateLimitWindowSeconds = ConvertTo-RequiredPositiveInt -EnvVarName 'API_RATE_LIMIT_WINDOW_SECONDS' -Value $env:API_RATE_LIMIT_WINDOW_SECONDS -Default $config.RateLimitWindowSeconds
+    $config.AuthEnabled = ConvertTo-RequiredBool -EnvVarName 'API_AUTH_ENABLED' -Value $env:API_AUTH_ENABLED -Default $config.AuthEnabled
+
+    # API_AUTH_KEYS is a secret (the credential itself, same category as
+    # API_CERT_PASSWORD above) - read here only long enough to fail fast on
+    # a broken setup, never assigned into $config, which is shared Pode
+    # state (Set-PodeState 'AppConfig') readable from every runspace and
+    # partly written to the Application log at startup. The auth middleware
+    # (src/middleware/Authentication.ps1) reads $env:API_AUTH_KEYS directly,
+    # at the one point it is actually needed - same pattern as the
+    # certificate password.
+    if ($config.AuthEnabled -and [string]::IsNullOrWhiteSpace($env:API_AUTH_KEYS)) {
+        throw "API_AUTH_ENABLED is true but API_AUTH_KEYS is not set. Provide at least one key (comma-separated for more than one) or set API_AUTH_ENABLED=false."
+    }
 
     return $config
 }

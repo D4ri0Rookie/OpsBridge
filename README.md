@@ -15,7 +15,9 @@ OpsBridge exposes infrastructure automation over a plain REST API (HTTP or
 HTTPS). Windows today, with Active Directory, VMware vCenter, Azure and
 Exchange Online planned as `/api/v1/<area>/*` additions on top of the same
 pattern — REST-first, no UI dependency, one consistent way to add a new
-capability.
+capability. See [Target architecture](docs/architecture.md#target-architecture)
+for where the transport (SSH to remote targets) and the interface (MCP) are
+headed next — direction only, not implemented yet.
 
 ```mermaid
 flowchart LR
@@ -23,7 +25,7 @@ flowchart LR
 
     subgraph API["OpsBridge"]
         direction LR
-        Endpoint --> MW["Correlation ID + Security<br/>+ Rate/Concurrency Limits"]
+        Endpoint --> MW["Correlation ID + Security<br/>+ Rate/Concurrency + Auth"]
         MW --> Routes["Routes<br/>/api/v1/*"]
         Routes --> Services["Services"]
     end
@@ -67,11 +69,12 @@ docker run --rm -p 8080:8080 opsbridge
 - **One error shape everywhere** — `{ "error": { "code", "message", "correlationId" } }`, no stack traces ever leaked to a client
 - **Thin routes, real services** — automation logic has zero Pode dependency, so it's unit-testable on its own
 - **Built-in hardening** — request body/rate/concurrency limits, graceful shutdown on SIGTERM, all fail-fast on bad config
+- **Optional API key gate** — `API_AUTH_ENABLED=true`, off by default; health probes stay open
 - **Nothing hidden** — adding an endpoint means adding a route file + a service file, not learning an internal framework
 
 ## Tests
 
-**160 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
+**212 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
 Integration tests start a real server process and check the actual HTTP
 contract — status codes, headers, JSON shape, correlation id — not just
 isolated functions.
@@ -86,7 +89,7 @@ benchmark, just proof it holds up under concurrent load with the default 3 Pode 
 
 | Requests | Concurrency | Result | Latency (min / avg / p95 / max) |
 |---|---|---|---|
-| 1000 | 50 | 1000/1000 `200` | 6.3 / 11.3 / 16.7 / 139.9 ms |
+| 1000 | 50 | 1000/1000 `200` | 3.3 / 16.4 / 83.9 / 280.8 ms |
 
 ```powershell
 .\scripts\load-test.ps1 -TotalRequests 1000 -Concurrency 50
@@ -104,13 +107,16 @@ benchmark, just proof it holds up under concurrent load with the default 3 Pode 
 
 ## Status
 
-Early stage. Health endpoints and one reference API
-(`GET /api/v1/windows/services`) are implemented end-to-end — route, service,
-unit + integration tests, docs — as the template every future integration
-follows. Runtime hardening (body/rate/concurrency limits, graceful shutdown —
-see [configuration.md](docs/configuration.md)) is in place; authentication
-and authorization are still deliberately out of scope (see
-[architecture.md](docs/architecture.md)).
+Early stage. Health endpoints and two Windows capabilities
+(`GET /api/v1/windows/services`, `GET /api/v1/windows/processes`) are
+implemented end-to-end — route, service, unit + integration tests, docs —
+following the [capability contract](docs/api.md#capability-contract) every
+future integration follows. Runtime hardening (body/rate/concurrency limits,
+graceful shutdown — see [configuration.md](docs/configuration.md)) is in
+place. Authentication is implemented and optional (`API_AUTH_ENABLED`, off
+by default — see [api.md](docs/api.md#authentication)); authorization is
+still deliberately out of scope until a capability actually needs to
+differentiate callers (see [architecture.md](docs/architecture.md)).
 
 ## License
 

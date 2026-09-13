@@ -98,6 +98,38 @@ Describe 'Unknown routes' {
             $raw | Should -Not -Match 'Pode|PowerShell 7'
         }
     }
+
+    It 'serves the error body as application/json' {
+        try {
+            Invoke-WebRequest -Uri "$script:BaseUrl/does-not-exist" -UseBasicParsing
+            throw 'Expected the request to fail with 404'
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            (Get-ErrorHeaderValue $_.Exception.Response 'Content-Type') | Should -Match 'application/json'
+        }
+    }
+}
+
+Describe 'Wrong HTTP method on an existing route' {
+    It 'falls through to the coherent 404 catch-all instead of a raw 405 (docs/architecture.md: routes are registered per-method, not with -Method *)' {
+        # api/v1/windows/services is GET-only. Pode's own "Method Not Allowed"
+        # behaviour (if it ever kicked in here instead of the catch-all) would
+        # skip the correlation id / security header / JSON error middleware
+        # this whole suite otherwise guarantees on every response - a route
+        # registration regression this subtle would otherwise go unnoticed.
+        try {
+            Invoke-WebRequest -Uri "$script:BaseUrl/api/v1/windows/services" -Method Post -UseBasicParsing
+            throw 'Expected the request to fail with 404'
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            $resp = $_.Exception.Response
+            $resp.StatusCode.value__ | Should -Be 404
+            $body = $_.ErrorDetails.Message | ConvertFrom-Json
+            $body.error.code | Should -Be 'NOT_FOUND'
+            $body.error.correlationId | Should -Not -BeNullOrEmpty
+            (Get-ErrorHeaderValue $resp 'X-Correlation-ID') | Should -Not -BeNullOrEmpty
+        }
+    }
 }
 
 Describe 'Correlation ID' {
@@ -133,5 +165,16 @@ Describe 'Correlation ID' {
     It 'rejects an id longer than 128 characters' {
         $r = Invoke-WebRequest -Uri "$script:BaseUrl/health/live" -Headers @{ 'X-Correlation-ID' = ('a' * 200) } -UseBasicParsing
         (Get-HeaderValue $r 'X-Correlation-ID') | Should -Not -Be ('a' * 200)
+    }
+
+    It 'generates a different id for each of two separate requests (no accidental reuse across requests)' {
+        # Guards the exact class of bug docs/architecture.md's "Gotcha" note
+        # describes: state that looks per-request but is actually shared
+        # across runspaces/requests. Get-CorrelationId is read from
+        # $WebEvent.Data, which is request-scoped, but nothing before this
+        # proved two consecutive requests actually get independent values.
+        $first = Get-HeaderValue (Invoke-WebRequest -Uri "$script:BaseUrl/health/live" -UseBasicParsing) 'X-Correlation-ID'
+        $second = Get-HeaderValue (Invoke-WebRequest -Uri "$script:BaseUrl/health/live" -UseBasicParsing) 'X-Correlation-ID'
+        $first | Should -Not -Be $second
     }
 }

@@ -120,8 +120,26 @@ Describe 'Request log content' {
         $entry.statusCode | Should -Be 200
         $entry.durationMs | Should -BeGreaterOrEqual 0
         $entry.correlationId | Should -Be $id
+        $entry.clientIp | Should -Be '127.0.0.1'
+        $entry.PSObject.Properties.Name | Should -Not -Contain 'errorType'
 
         Assert-IsoUtcTimestamp -Timestamp (Get-RawJsonStringField -Line $entry.RawLine -Field 'timestamp')
+    }
+
+    It 'includes errorType (the same code returned in the error body) on a non-2xx response' {
+        $id = "logging-test-errortype-$([guid]::NewGuid().ToString('N'))"
+        try {
+            Invoke-WebRequest -Uri "$script:BaseUrl/does-not-exist" -Headers @{ 'X-Correlation-ID' = $id } -UseBasicParsing
+        }
+        catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+            $null = $_
+        }
+
+        $entry = Wait-ForLogEntry -LogsPath $script:LogsPath -FileFilter 'requests_*.log' -Contains "`"correlationId`":`"$id`""
+
+        $entry | Should -Not -BeNullOrEmpty
+        $entry.statusCode | Should -Be 404
+        $entry.errorType | Should -Be 'NOT_FOUND'
     }
 
     It 'marks a client error (4xx) as http.request.completed, not http.request.failed' {

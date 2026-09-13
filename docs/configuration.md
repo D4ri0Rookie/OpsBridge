@@ -28,14 +28,20 @@ repository.
 | `API_RATE_LIMIT_ENABLED`   | `false`       | `true`/`false` - enable the in-process rate limiter |
 | `API_RATE_LIMIT_REQUESTS`  | `300`         | Requests allowed per window, across all clients (integer >= 1), only enforced when `API_RATE_LIMIT_ENABLED=true` |
 | `API_RATE_LIMIT_WINDOW_SECONDS` | `60`     | Rate limit window length in seconds (integer >= 1), only enforced when `API_RATE_LIMIT_ENABLED=true` |
+| `API_AUTH_ENABLED`         | `false`       | `true`/`false` - require `X-Api-Key` on every request except `/health/live` and `/health/ready` (see [api.md](api.md#authentication)) |
+| `API_AUTH_KEYS`            | *(none)*      | Comma-separated list of valid API keys. Required when `API_AUTH_ENABLED=true`. A secret: read directly by `src/middleware/Authentication.ps1`, never stored in `Get-AppConfig`'s output - same treatment as `API_CERT_PASSWORD` below |
 
 **Fail-fast settings**: `API_MAX_BODY_BYTES`, `API_MAX_IN_FLIGHT_REQUESTS`,
-`API_REQUEST_TIMEOUT_SECONDS`, `API_SHUTDOWN_TIMEOUT_SECONDS`, and the three
-`API_RATE_LIMIT_*` settings work differently from everything else on this
-page: an invalid value aborts startup immediately (exit code `1`) instead of
-falling back with a warning, because they guard process stability. This
-applies even when the related feature is disabled - e.g. a bad
-`API_RATE_LIMIT_REQUESTS` still fails startup with `API_RATE_LIMIT_ENABLED=false`.
+`API_REQUEST_TIMEOUT_SECONDS`, `API_SHUTDOWN_TIMEOUT_SECONDS`, the three
+`API_RATE_LIMIT_*` settings, and `API_AUTH_ENABLED`/`API_AUTH_KEYS` work
+differently from everything else on this page: an invalid value aborts
+startup immediately (exit code `1`) instead of falling back with a warning,
+because they guard process stability or security. This applies even when
+the related feature is disabled - e.g. a bad `API_RATE_LIMIT_REQUESTS`
+still fails startup with `API_RATE_LIMIT_ENABLED=false`. `API_AUTH_KEYS` is
+the one exception in the other direction: it is only required - and only
+checked - when `API_AUTH_ENABLED=true`; leaving it unset while auth is
+disabled is fine.
 
 The application version is **not** an environment variable - it is defined once
 as `AppVersion` in `src/config/Config.ps1` and reported by `/health/ready`.

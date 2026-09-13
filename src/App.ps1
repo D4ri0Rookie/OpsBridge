@@ -478,6 +478,7 @@ function Start-ApplicationServer {
                 'src/middleware/Shutdown.ps1'
                 'src/middleware/RateLimit.ps1'
                 'src/middleware/Concurrency.ps1'
+                'src/middleware/Authentication.ps1'
                 # App.ps1 itself: Start-PodeServer's -ScriptBlock runs inside
                 # Pode's own session state, not the caller's, so Add-AppRoute /
                 # Register-ApplicationRoutes / Register-ApplicationServices
@@ -559,12 +560,16 @@ function Start-ApplicationServer {
             # headers first, so even a rejection below still carries them.
             # Then the shutdown gate, then rate limiting, then concurrency - a
             # rate-limited request should not also take a concurrency slot.
-            # The endware pair runs at the end, regardless of outcome.
+            # Authentication runs last, right before any route - an
+            # unauthenticated request is rejected without ever reaching a
+            # route handler. The endware pair runs at the end, regardless of
+            # outcome.
             Add-CorrelationIdMiddleware
             Add-SecurityHeadersMiddleware
             Add-ShutdownGateMiddleware
             Add-RateLimitMiddleware
             Add-ConcurrencyLimitMiddleware
+            Add-AuthenticationMiddleware
             Add-ShutdownWatcherTimer
             Add-RequestLoggingEndware
             Add-ConcurrencyReleaseEndware

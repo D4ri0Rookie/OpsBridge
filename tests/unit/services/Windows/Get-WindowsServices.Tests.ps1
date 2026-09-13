@@ -43,6 +43,20 @@ Describe 'Get-OpsBridgeWindowsServices' {
             $result.Services[0].startType | Should -Be 'Automatic'
         }
 
+        It 'shapes a single service without unwrapping the Services array to a scalar' {
+            # PowerShell's pipeline silently unwraps a one-element array in some
+            # contexts - shapeing must go through @() explicitly so .Services
+            # stays indexable/Count-able even with exactly one result.
+            Mock Invoke-OpsBridgeGetService {
+                @([pscustomobject]@{ Name = 'spooler'; DisplayName = 'Print Spooler'; Status = 'Running'; StartType = 'Automatic' })
+            }
+
+            $result = Get-OpsBridgeWindowsServices -IsSupportedPlatform $true
+
+            $result.Services.Count | Should -Be 1
+            $result.Services[0].name | Should -Be 'spooler'
+        }
+
         It 'calls the service wrapper with no -Name' {
             Mock Invoke-OpsBridgeGetService { @() }
 
@@ -74,6 +88,20 @@ Describe 'Get-OpsBridgeWindowsServices' {
             # instead of through the pipeline.
             ($null -ne $result.Services) | Should -BeTrue
             $result.Services.Count | Should -Be 0
+        }
+    }
+
+    Context 'dependency failure' {
+        It 'lets an exception from the service wrapper propagate uncaught' {
+            # Get-OpsBridgeWindowsServices has no try/catch of its own - a
+            # dependency failure (e.g. Get-Service denied) is meant to reach
+            # the route unhandled, where Add-AppRoute's wrapper
+            # (src/App.ps1, tests/unit/AppRoute.Tests.ps1) turns it into the
+            # standard 500 INTERNAL_ERROR. This locks in that division of
+            # responsibility: the service does not swallow or reshape it.
+            Mock Invoke-OpsBridgeGetService { throw [System.InvalidOperationException]::new('Access is denied') }
+
+            { Get-OpsBridgeWindowsServices -IsSupportedPlatform $true } | Should -Throw '*Access is denied*'
         }
     }
 }
