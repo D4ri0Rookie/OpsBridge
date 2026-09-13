@@ -15,12 +15,16 @@
     every capability today is equally "safe"/read-only; add it when a
     capability actually needs to differentiate callers, not before.
 
-    Registered after Concurrency Limit, before any route (docs/architecture.md)
-    - an unauthenticated request never reaches a route handler, including the
-    catch-all, so it gets 401 rather than leaking whether a path exists.
-    /health/live and /health/ready are exempt: liveness/readiness probes
-    (load balancers, orchestrators) typically cannot be configured with a
-    credential, and they reveal nothing sensitive.
+    Registered after Rate Limit but before Concurrency Limit and any route
+    (docs/architecture.md): rate limiting must still apply to a request
+    before its credentials are checked - otherwise a flood of unauthenticated
+    traffic would bypass it entirely - but an unauthenticated request must
+    never occupy a concurrency slot doing no real work, and never reaches a
+    route handler either (including the catch-all, so it gets 401 rather than
+    leaking whether a path exists). /health/live and /health/ready are
+    exempt: liveness/readiness probes (load balancers, orchestrators)
+    typically cannot be configured with a credential, and they reveal
+    nothing sensitive.
 
     Unlike every sibling middleware in this pipeline, this one fails CLOSED:
     RateLimit/Concurrency/Shutdown all "fail open" on an internal error

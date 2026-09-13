@@ -54,7 +54,7 @@ One line per lifecycle/service/external-dependency event, written with
   "application": "OpsBridge",
   "environment": "Production",
   "correlationId": null,
-  "appVersion": "0.5.0",
+  "appVersion": "0.5.2",
   "listenAddress": "0.0.0.0",
   "port": 8080,
   "protocol": "Https"
@@ -66,6 +66,8 @@ parallel taxonomy):
 
 ```
 application.started
+application.shutdown.started
+application.shutdown.completed
 application.stopped
 application.startup.warning
 application.route.loaded
@@ -76,6 +78,18 @@ service.operation.started
 service.operation.completed
 service.operation.failed
 ```
+
+**Known gap**: `application.shutdown.started`/`.completed`/`.stopped` are written
+from inside Pode's `Terminate` event
+(`Invoke-AppShutdownTerminateHandler`, [src/middleware/Shutdown.ps1](../src/middleware/Shutdown.ps1)),
+which fires from the same cancellation signal that also tells Pode's own
+file-log-writer runspace to stop - there is no ordering guarantee between
+the two, so on a real shutdown these specific lines can be delayed or lost
+entirely even though the underlying drain-wait they describe still ran
+correctly (verified directly against Pode 2.14.1). Don't treat their
+absence as proof shutdown didn't happen; the process's own exit code and
+the client-visible `503 SHUTTING_DOWN` behavior ([api.md](api.md#shutting-down))
+are the reliable signals.
 
 ### Request log
 

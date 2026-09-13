@@ -35,6 +35,53 @@ BeforeAll {
             $Semaphore.Release() | Out-Null
         } -ArgumentList $Semaphore, $DelayMilliseconds
     }
+
+    # Same reasoning as Start-DelayedSemaphoreRelease above: a real function
+    # so the suppression can attach to it, and $ShutdownPath/$RepoRoot *are*
+    # passed safely via -ArgumentList/param() - a known false positive for
+    # Start-Job, same as Start-ThreadJob.
+    function Start-AppShutdownTerminateHandlerInEmptyProcess {
+        [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseUsingScopeModifierInNewRunspaces', '', Justification = 'Passed via -ArgumentList/param(), not a closure over an outer variable - a known false positive for Start-Job.')]
+        param(
+            [string]$ShutdownPath,
+            [string]$RepoRoot
+        )
+
+        Start-Job -ScriptBlock {
+            param($ShutdownPath, $RepoRoot)
+            # $RepoRoot is used below, but only via closure from inside the
+            # nested Get-PodeServerPath function - too indirect for
+            # PSReviewUnusedParameter's static analysis to trace.
+            $null = $RepoRoot
+
+            function Get-PodeServerPath { $RepoRoot }
+            function Get-PodeState {
+                param($Name)
+                switch ($Name) {
+                    'AppConfig' { @{ MaxInFlightRequests = 5; ShutdownTimeoutSeconds = 10 } }
+                    'ConcurrencySemaphore' { [System.Threading.SemaphoreSlim]::new(5, 5) }
+                }
+            }
+            # Stands in for Pode's own log-writing cmdlet, which Write-AppLog
+            # (re-sourced from inside the function under test) calls - never
+            # itself stubbed by this test, proving the real implementation runs.
+            # A true no-op: the params only need to exist so the named-argument
+            # call from Write-AppLog binds; nothing here needs their values.
+            function Write-PodeLog {
+                [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'A no-op stand-in for Pode''s real cmdlet - only needs to accept these named arguments, never use them.')]
+                param($Name, $Level, $InputObject)
+            }
+
+            . $ShutdownPath
+            try {
+                Invoke-AppShutdownTerminateHandler
+                'ok'
+            }
+            catch {
+                "threw: $($_.Exception.Message)"
+            }
+        } -ArgumentList $ShutdownPath, $RepoRoot | Wait-Job -Timeout 20 | Receive-Job
+    }
 }
 
 Describe 'Wait-AppShutdownDrain' {
@@ -138,5 +185,55 @@ Describe 'Test-AppShutdownRequested' {
         # never throw and must reflect "not requested" unless a real SIGTERM/
         # SIGINT was actually received by *this* process.
         { Test-AppShutdownRequested } | Should -Not -Throw
+    }
+}
+
+Describe 'Invoke-AppShutdownTerminateHandler' {
+    <#
+        Regression guard for a real bug found by manual reproduction against
+        a live server: Pode invokes a registered Terminate event's
+        scriptblock via its own GetNewClosure() at *fire* time, not at
+        Register-PodeEvent time - so a variable closed over when the
+        scriptblock was written (e.g. $root) is already out of scope by
+        then. This intermittently made Wait-AppShutdownDrain "not
+        recognized" there, silently skipping the drain wait entirely. The
+        fix: re-source every dependency from a freshly called
+        Get-PodeServerPath, never a closed-over variable - these tests
+        mock Get-PodeServerPath to point at this repo's own real source
+        files, so a regression that reintroduces a closure/ambient
+        dependency here would fail these without needing a real Pode
+        server or a real SIGTERM at all.
+    #>
+    BeforeAll {
+        $script:RepoRootForTerminateHandler = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    }
+
+    It 'runs Wait-AppShutdownDrain and logs application.stopped by re-sourcing its own dependencies' {
+        Mock Get-PodeServerPath { $script:RepoRootForTerminateHandler }
+        Mock Get-PodeState {
+            switch ($Name) {
+                'AppConfig' { @{ MaxInFlightRequests = 5; ShutdownTimeoutSeconds = 10 } }
+                'ConcurrencySemaphore' { [System.Threading.SemaphoreSlim]::new(5, 5) }
+            }
+        }
+        Mock Write-AppLog {}
+
+        { Invoke-AppShutdownTerminateHandler } | Should -Not -Throw
+
+        Should -Invoke Get-PodeServerPath -Times 1
+        Should -Invoke Write-AppLog -ParameterFilter { $Event -eq 'application.shutdown.completed' }
+        Should -Invoke Write-AppLog -ParameterFilter { $Event -eq 'application.stopped' }
+    }
+
+    It 'still works in a genuinely empty process - not just one where Logging/CorrelationId happen to already be loaded' {
+        # Start-Job runs in a brand new PowerShell process: nothing this test
+        # file's own BeforeAll dot-sourced exists there, and Pode itself is
+        # never imported - only bare stubs for the three Pode-native cmdlets
+        # a real Pode server would provide (Get-PodeServerPath, Get-PodeState,
+        # Write-PodeLog). This is the closest a unit test can get to the real
+        # cross-runspace scenario the bug came from, without a running server.
+        $result = Start-AppShutdownTerminateHandlerInEmptyProcess -ShutdownPath "$PSScriptRoot/../../../src/middleware/Shutdown.ps1" -RepoRoot $script:RepoRootForTerminateHandler
+
+        $result | Should -Be 'ok'
     }
 }

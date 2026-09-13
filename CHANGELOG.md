@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.5.2 - 2026-09-13
+
+Bug fix: graceful shutdown's drain-wait could silently never run. Found by
+noticing a stray error log entry, root-caused by reading Pode 2.14.1's own
+source and reproducing it directly against a live server (not just from
+test suite behavior, which never caught it).
+
+- Root cause: `Register-PodeEvent -Type Terminate`'s scriptblock is invoked
+  by Pode via its own `GetNewClosure()` at *fire* time, not at
+  registration time - so a variable closed over when the scriptblock was
+  originally written (`$root`) is already out of scope by the time
+  Terminate actually fires. This intermittently made `Wait-AppShutdownDrain`
+  "not recognized" there (`CommandNotFoundException`), silently skipping
+  the drain wait entirely - in-flight requests could be cut off exactly
+  like the ungraceful-SIGTERM problem this mechanism exists to prevent.
+  The process still exited `0` regardless, so no existing test noticed
+- Fix: extracted the Terminate event's body into
+  `Invoke-AppShutdownTerminateHandler` (`src/middleware/Shutdown.ps1`) -
+  unit-testable now, same reasoning as `New-WrappedRouteScriptBlock` - which
+  re-sources every dependency it needs from a freshly called
+  `Get-PodeServerPath` (reads Pode's own server context, immune to the
+  closure problem) instead of trusting ambient availability
+- Separate, lower-severity finding along the way, documented rather than
+  worked around: Pode's own file-log-writer runspace polls the *same*
+  cancellation token that fires the Terminate event, with no ordering
+  guarantee between the two - so `application.shutdown.started`/
+  `.completed`/`.stopped` can still be delayed or lost on a real shutdown
+  even now that the drain-wait itself runs correctly. A synthetic delay
+  was tried and rejected (unreliable, adds shutdown latency for uncertain
+  benefit) - see `docs/logging.md`'s "Known gap" note. The two Application-
+  log events this uncovered as previously undocumented
+  (`application.shutdown.started`/`.completed`) are now listed in the
+  event taxonomy there too
+- 2 new unit tests (`tests/unit/middleware/Shutdown.Tests.ps1`): one proves
+  the handler runs correctly end-to-end, one runs it in a genuinely empty
+  PowerShell process (`Start-Job`, no Pode, nothing pre-loaded) with only
+  bare Pode-cmdlet stubs - the closest a unit test gets to the real
+  cross-runspace scenario the bug came from
+- Removed one integration test added earlier in this same investigation
+  that asserted on the (necessarily unreliable, per the finding above)
+  shutdown log content - it failed consistently for a reason unrelated to
+  correctness, so it would have been permanent noise, not signal
+- 216 unit + integration tests (219 total, 216 passing + 3 pre-existing
+  Windows-only skips on this non-Windows dev host); 0 PSScriptAnalyzer
+  findings
+
+## 0.5.1 - 2026-09-13
+
+Middleware pipeline reorder: authentication now runs between rate limiting
+and the concurrency gate, not after both. Prompted by external review of
+v0.5.0 - a deliberate ordering decision, not a bug fix, recorded here with
+its reasoning per the same "no silent architectural choices" standard the
+rest of the runtime already holds itself to.
+
+- New order: Correlation ID -> Security Headers -> Shutdown gate -> Rate
+  limit -> **Authentication** -> **Concurrency limit** -> route (previously
+  Rate limit -> Concurrency limit -> Authentication)
+- Why rate limit still precedes authentication: it is a volumetric,
+  identity-blind defense - if it ran after authentication, a flood of
+  unauthenticated traffic would bypass it entirely, since every one of
+  those requests would be rejected before ever reaching the rate limiter
+- Why authentication now precedes concurrency: a request rejected for
+  missing/invalid credentials does no real work, so it must never occupy a
+  concurrency slot a legitimate, authenticated request might need under
+  load - previously it briefly did (correctly released afterward, but still
+  consumed while held)
+- 2 new integration tests proving the new order directly: an unauthenticated
+  request never triggers `503 OVERLOADED` even when concurrent load exceeds
+  the concurrency limit (always `401` instead), and unauthenticated requests
+  still trigger `429 RATE_LIMIT_EXCEEDED` once the rate-limit budget is
+  spent (rate limiting is not bypassed by lacking credentials)
+- 214 unit + integration tests (217 total, 214 passing + 3 pre-existing
+  Windows-only skips on this non-Windows dev host); 0 PSScriptAnalyzer
+  findings
+- No behavior change for a request that IS authenticated, and no change to
+  `/health/live`/`/health/ready` (still exempt from authentication, still
+  subject to rate limiting like every other path)
+
 ## 0.5.0 - 2026-09-13
 
 Authentication: an optional API-key gate for the runtime, off by default.

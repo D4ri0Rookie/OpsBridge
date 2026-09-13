@@ -477,8 +477,8 @@ function Start-ApplicationServer {
                 'src/middleware/SecurityHeaders.ps1'
                 'src/middleware/Shutdown.ps1'
                 'src/middleware/RateLimit.ps1'
-                'src/middleware/Concurrency.ps1'
                 'src/middleware/Authentication.ps1'
+                'src/middleware/Concurrency.ps1'
                 # App.ps1 itself: Start-PodeServer's -ScriptBlock runs inside
                 # Pode's own session state, not the caller's, so Add-AppRoute /
                 # Register-ApplicationRoutes / Register-ApplicationServices
@@ -558,18 +558,20 @@ function Start-ApplicationServer {
             # --- middleware -------------------------------------------------
             # Order matters (docs/architecture.md): correlation id and security
             # headers first, so even a rejection below still carries them.
-            # Then the shutdown gate, then rate limiting, then concurrency - a
-            # rate-limited request should not also take a concurrency slot.
-            # Authentication runs last, right before any route - an
-            # unauthenticated request is rejected without ever reaching a
-            # route handler. The endware pair runs at the end, regardless of
-            # outcome.
+            # Then the shutdown gate, then rate limiting - a volumetric,
+            # identity-blind defense that must apply to a request before its
+            # credentials are even checked, otherwise a flood of unauthenticated
+            # traffic would bypass it entirely. Authentication runs next, before
+            # concurrency: an unauthenticated request is rejected doing no real
+            # work, so it must never occupy a concurrency slot a legitimate
+            # request might need. Route is last. The endware pair runs at the
+            # end, regardless of outcome.
             Add-CorrelationIdMiddleware
             Add-SecurityHeadersMiddleware
             Add-ShutdownGateMiddleware
             Add-RateLimitMiddleware
-            Add-ConcurrencyLimitMiddleware
             Add-AuthenticationMiddleware
+            Add-ConcurrencyLimitMiddleware
             Add-ShutdownWatcherTimer
             Add-RequestLoggingEndware
             Add-ConcurrencyReleaseEndware
@@ -584,15 +586,27 @@ function Start-ApplicationServer {
 
             # --- shutdown --------------------------------------------------
             # Pode fires Terminate just before it stops serving, listeners
-            # still up. Wait-AppShutdownDrain (src/middleware/Shutdown.ps1)
-            # blocks here until every in-flight request finishes or
-            # API_SHUTDOWN_TIMEOUT_SECONDS elapses, then this logs one line so
-            # a normal shutdown shows up in the Application log
-            # (Write-BootstrapLog only logs the later "Server stopped" line,
-            # after Pode has torn down).
+            # still up. Invoke-AppShutdownTerminateHandler
+            # (src/middleware/Shutdown.ps1) waits for in-flight requests and
+            # logs the outcome (Write-BootstrapLog only logs the later
+            # "Server stopped" line, after Pode has torn down) - pulled out
+            # into its own function, not left as an inline scriptblock here,
+            # specifically so it is unit-testable without a running Pode
+            # server (same reasoning as New-WrappedRouteScriptBlock above)
+            # and so it can re-source its own dependencies via a freshly
+            # called Get-PodeServerPath rather than a closed-over $root: a
+            # Terminate event's scriptblock is invoked by Pode via its own
+            # GetNewClosure() at fire time, not at Register-PodeEvent time,
+            # so $root here would already be out of scope by then - verified
+            # directly, this intermittently made Wait-AppShutdownDrain "not
+            # recognized", silently skipping the drain wait entirely.
             Register-PodeEvent -Type Terminate -Name 'AppShutdownLog' -ScriptBlock {
-                Wait-AppShutdownDrain
-                Write-AppLog -Level Info -Event 'application.stopped'
+                # Guarantees Invoke-AppShutdownTerminateHandler itself is
+                # defined here, for the same reason it re-sources its own
+                # dependencies internally - see its own doc comment
+                # (src/middleware/Shutdown.ps1).
+                . (Join-Path (Get-PodeServerPath) 'src/middleware/Shutdown.ps1')
+                Invoke-AppShutdownTerminateHandler
             }
 
             # --- ready ---------------------------------------------------

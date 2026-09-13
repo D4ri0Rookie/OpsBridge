@@ -32,12 +32,18 @@ flowchart TB
     class External external
 ```
 
-Shutdown/rate limit/concurrency/authentication each run as their own
+Shutdown/rate limit/authentication/concurrency each run as their own
 middleware, in that order, right after Security headers - drawn as one
 decision above to keep the diagram simple; see
 [Layer responsibilities](#layer-responsibilities) below for the exact order.
-Authentication is skipped for `/health/live` and `/health/ready` regardless
-of this diagram's simplification - see [api.md](api.md#authentication).
+Rate limiting runs before authentication (a volumetric defense that must
+apply regardless of whether credentials are valid, otherwise unauthenticated
+traffic would bypass it entirely), and authentication runs before
+concurrency (a request rejected for bad/missing credentials does no real
+work, so it must never occupy a concurrency slot a legitimate request might
+need). Authentication is skipped for `/health/live` and `/health/ready`
+regardless of this diagram's simplification - see
+[api.md](api.md#authentication).
 
 ## Layer responsibilities
 
@@ -45,11 +51,14 @@ of this diagram's simplification - see [api.md](api.md#authentication).
   Configured in `server.psd1` (request timeout/body size, error page defaults)
   and started from `src/App.ps1`.
 - **Middleware** (`src/middleware/`) - cross-cutting concerns only: correlation
-  id, security headers, the shutdown gate, rate limiting, the in-flight
-  concurrency gate, authentication, request logging. Runs in this order for
-  every request: Correlation ID -> Security Headers -> Shutdown gate -> Rate
-  limit -> Concurrency limit -> Authentication -> (future: Authorization) ->
-  route -> Request Logging / Concurrency release (endware, always runs).
+  id, security headers, the shutdown gate, rate limiting, authentication, the
+  in-flight concurrency gate, request logging. Runs in this order for every
+  request: Correlation ID -> Security Headers -> Shutdown gate -> Rate limit
+  -> Authentication -> Concurrency limit -> (future: Authorization) -> route
+  -> Request Logging / Concurrency release (endware, always runs). Rate
+  limit precedes authentication (identity-blind, volumetric protection);
+  authentication precedes concurrency (a rejected, unauthenticated request
+  does no real work and must never hold a slot meant for one that does).
 - **Routes** (`src/routes/`, `src/routes/v1/`) - thin: HTTP method + path,
   request validation, call one service function, map its result to an HTTP
   status code and body. No automation logic lives in a route file.

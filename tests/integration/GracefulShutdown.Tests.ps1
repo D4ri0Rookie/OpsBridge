@@ -10,7 +10,13 @@
 
     The timeout case (a request that never finishes) is unit-tested instead
     (tests/unit/middleware/Shutdown.Tests.ps1) - there is no route slow
-    enough to trigger it for real.
+    enough to trigger it for real. So is the correctness of
+    Invoke-AppShutdownTerminateHandler itself (same file): Pode's own
+    file-log writer races the same Terminate signal that fires this event
+    (verified directly - its background runspace polls the identical
+    cancellation token and can stop before a log line written from inside
+    the event handler is flushed), so asserting on log content from here
+    would be flaky by construction, not a sign of a real regression.
 #>
 
 BeforeAll {

@@ -206,9 +206,11 @@ A missing or wrong key gets:
 }
 ```
 
-Status `401`, with a `WWW-Authenticate: ApiKey` header. This runs as the
-last middleware before any route (see [architecture.md](architecture.md)),
-so an unauthenticated request never reaches a route handler - including the
+Status `401`, with a `WWW-Authenticate: ApiKey` header. This runs after rate
+limiting but before the concurrency gate and any route (see
+[architecture.md](architecture.md)) - so a request is still subject to rate
+limiting regardless of its credentials, but never occupies a concurrency
+slot or reaches a route handler once rejected here. This includes the
 catch-all, so an unmatched path also answers `401`, not `404`, when auth is
 enabled.
 

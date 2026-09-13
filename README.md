@@ -74,7 +74,7 @@ docker run --rm -p 8080:8080 opsbridge
 
 ## Tests
 
-**212 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
+**216 unit + integration tests passing, 0 PSScriptAnalyzer findings** (Pester 6).
 Integration tests start a real server process and check the actual HTTP
 contract — status codes, headers, JSON shape, correlation id — not just
 isolated functions.

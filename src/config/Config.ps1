@@ -100,7 +100,7 @@ function Get-AppConfig {
     )
 
     $config = [ordered]@{
-        AppVersion       = '0.5.0'
+        AppVersion       = '0.5.2'
         Environment      = 'Development'   # Development, Test, Production
         ListenAddress    = '0.0.0.0'       # container-friendly default
         Port             = 8080

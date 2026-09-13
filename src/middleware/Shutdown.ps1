@@ -130,3 +130,36 @@ function Wait-AppShutdownDrain {
         inFlightRequests = $config.MaxInFlightRequests - $semaphore.CurrentCount
     }
 }
+
+function Invoke-AppShutdownTerminateHandler {
+    <#
+        The body of the Register-PodeEvent -Type Terminate registration in
+        src/App.ps1 - pulled out into its own function, not left as an
+        inline scriptblock, for two reasons: it is unit-testable this way
+        (same reasoning as New-WrappedRouteScriptBlock in src/App.ps1), and
+        it can re-source what it calls itself rather than trusting ambient
+        availability.
+
+        That trust turned out to be misplaced: Pode invokes a registered
+        event's scriptblock via its own GetNewClosure() at *fire* time, not
+        at Register-PodeEvent time - so a variable like $root, valid when
+        this was originally written inline, is already out of scope by the
+        time Terminate actually fires. Verified directly: this intermittently
+        made Wait-AppShutdownDrain "not recognized" in that context, which
+        silently skipped the drain wait entirely - the exact ungraceful-
+        shutdown failure mode this mechanism exists to prevent. A fresh
+        Get-PodeServerPath call has no such problem (Pode resolves it from
+        its own server context, not a closure), so every dependency this
+        function needs is re-sourced from that, every time, regardless of
+        which runspace ends up running it.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $terminateRoot = Get-PodeServerPath
+    . (Join-Path $terminateRoot 'src/logging/Logging.ps1')
+    . (Join-Path $terminateRoot 'src/middleware/CorrelationId.ps1')
+
+    Wait-AppShutdownDrain
+    Write-AppLog -Level Info -Event 'application.stopped'
+}
